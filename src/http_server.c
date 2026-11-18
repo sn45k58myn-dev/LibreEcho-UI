@@ -37,8 +37,11 @@ extern int setgroups(int,const gid_t*);
 #define LE_HEADER_MAX 8192
 #define LE_BODY_MAX 16384
 /* Absolute header/body budget from accept, never renewed by incoming bytes.
-   Completed requests close or hand off to a worker outside this slot budget. */
+   Completed requests close, drain briefly, or hand off to a bounded worker. */
 #define LE_REQUEST_TIMEOUT_MS 15000
+/* Deliver an early rejection without resetting an upload that is still in
+   flight. Draining uses the same bounded poll slots and never renews this cap. */
+#define LE_REJECT_DRAIN_TIMEOUT_MS 1000
 /* The ceiling lives in api.h so the size the API advertises and the size
    enforced here cannot drift apart. */
 #define LE_UPDATE_PATH "/data/libreecho/update/incoming/manual.tar"
@@ -77,11 +80,12 @@ enum child_worker_kind{CHILD_WORKER_ASSISTANT,CHILD_WORKER_TLS_RELAY,CHILD_WORKE
 struct client{int fd;
 int secure_transport;
 size_t used;
+size_t drain_remaining;
 unsigned long long started_ms;
 char buf[LE_REQ_MAX+1];
 };
 /* Reset state after closing or handing off the fd; never close a worker's fd twice. */
-static void client_clear(struct client*c){c->fd=-1;c->secure_transport=0;c->used=0;c->buf[0]=0;c->started_ms=0;}
+static void client_clear(struct client*c){c->fd=-1;c->secure_transport=0;c->used=0;c->drain_remaining=0;c->buf[0]=0;c->started_ms=0;}
 static volatile sig_atomic_t child_worker_pids[LE_MAX_CHILD_WORKERS];
 static volatile sig_atomic_t child_worker_kinds[LE_MAX_CHILD_WORKERS];
 static volatile sig_atomic_t child_worker_counts[CHILD_WORKER_KIND_COUNT];
@@ -228,6 +232,22 @@ close(f);
 return 0;
 }
 static int destructive_path(const char*path){return !strcmp(path,"/api/v1/system/reboot")||!strcmp(path,"/api/v1/system/reboot-bootloader")||!strcmp(path,"/api/v1/system/shutdown")||!strcmp(path,"/api/v1/system/factory-reset");}
+static void finish_client_response(struct client*c,size_t headers,size_t content_len)
+{
+    size_t received=c->used>headers?c->used-headers:0;
+    long long now;
+    /* Closing a TCP socket with unread request data can discard the response
+       with RST. Send its FIN now, then discard only the declared, bounded body
+       through the poll loop. A sender that stops on the response cannot hold
+       a slot for the ordinary incomplete-request budget. */
+    if(content_len>received&&content_len<=LE_UPDATE_MAX_BYTES&&
+       (now=send_now_ms())>=0&&shutdown(c->fd,SHUT_WR)==0){
+        c->drain_remaining=content_len-received;
+        c->used=0;c->buf[0]=0;c->started_ms=(unsigned long long)now;
+        return;
+    }
+    close(c->fd);client_clear(c);
+}
 static void process(struct client*c,const struct http_options*o,struct api_context*api,int http_listener,int https_listener,int relay_listener,const struct client*clients,int max){char*end=strstr(c->buf,"\r\n\r\n"),*body,*cl,*target_start,*target_end;
 size_t headers,body_len=0,content_len=0;
 const char *page_path;
@@ -309,8 +329,7 @@ else {char portal[32],clean[256];size_t clean_len=strcspn(q.path,"?#");int recov
 if(recovery_active&&(captive_probe_path(q.path)||host_is_foreign(q.host,portal)||(!strcmp(clean,"/")&&!strstr(q.path,"recovery")))){portal_redirect(c->fd,portal);}
 else {const char*base=strrchr(q.path,'/');base=base?base+1:q.path;page_path=q.path;if(recovery_active&&!strcmp(clean,"/"))page_path="/setup.html";else if(!strcmp(q.path,"/login"))page_path="/login.html";else if(!strcmp(q.path,"/initial-setup"))page_path="/initial-setup.html";else if(!strcmp(q.path,"/")&&!api->setup_completed)page_path="/setup.html";else if(api_bootstrap_required(api)&&!strchr(base,'.'))page_path="/initial-setup.html";if(serve_file(c->fd,o,page_path)){if(strchr(base,'.')||serve_file(c->fd,o,"/index.html"))response(c->fd,404,"text/plain","Not found",9);}}}
 
-done:close(c->fd);
-client_clear(c);
+done:finish_client_response(c,headers,content_len);
 }
 /*
  * HTTPS is served by terminating TLS in a short-lived child that relays
@@ -440,9 +459,9 @@ p[i+1].events=POLLIN;
 }ready=poll(p,(nfds_t)(max+3),le_feature_provenance_busy()?0:500);if(ready<0&&errno!=EINTR)break;
 if(clock_gettime(CLOCK_MONOTONIC,&now)<0)break;
 now_ms=(unsigned long long)now.tv_sec*1000+(unsigned long long)now.tv_nsec/1000000;
-/* Only incomplete requests remain in these slots. Expire before accepting so
-   a full set of idle clients cannot prevent the next connection from working. */
-for(i=0;i<max;i++)if(c[i].fd>=0&&now_ms-c[i].started_ms>=LE_REQUEST_TIMEOUT_MS){close(c[i].fd);client_clear(&c[i]);p[i+1].revents=0;}
+/* Incomplete requests and rejected bodies remain in these slots. Expire before
+   accepting so idle clients cannot prevent the next connection from working. */
+for(i=0;i<max;i++)if(c[i].fd>=0&&now_ms-c[i].started_ms>=(c[i].drain_remaining?LE_REJECT_DRAIN_TIMEOUT_MS:LE_REQUEST_TIMEOUT_MS)){close(c[i].fd);client_clear(&c[i]);p[i+1].revents=0;}
 if(ready<0)continue;
 if(p[0].revents&POLLIN){int fd=accept(ls,0,0);
 if(fd>=0&&close_on_exec(fd)<0){close(fd);fd=-1;}
@@ -464,6 +483,9 @@ i<max;
 i++)if(c[i].fd>=0&&(p[i+1].revents&(POLLIN|POLLHUP|POLLERR))){ssize_t n=recv(c[i].fd,c[i].buf+c[i].used,LE_REQ_MAX-c[i].used,0);
 if(n<=0){close(c[i].fd);
 client_clear(&c[i]);
+}else if(c[i].drain_remaining){
+if((size_t)n>=c[i].drain_remaining){close(c[i].fd);client_clear(&c[i]);}
+else c[i].drain_remaining-=(size_t)n;
 }else{c[i].used+=(size_t)n;
 c[i].buf[c[i].used]=0;
 process(&c[i],o,api,ls,tls_ls,relay_ls,c,max);
