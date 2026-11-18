@@ -124,6 +124,9 @@ def main():
                 state = command(path, "status")
                 assert not state["playing"] and not state["paused"] and not state["url"]
                 # Abrupt daemon death while paused must not leave a frozen worker.
+                # Discard the stopped player's queued PCM so readiness below
+                # proves that the new worker has actually started playback.
+                drain(fd)
                 command(path, "play", {"url": url})
                 wait_for(lambda: drain(fd) > 0)
                 worker = wait_for(lambda: children(process.pid))[0]
