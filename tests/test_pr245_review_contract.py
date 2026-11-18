@@ -115,3 +115,9 @@ assert "access(socket_path,F_OK)" not in api
 assert "tests/test_voice_pipeline_ha_transitions.sh" in runner
 
 print("PR 245 Home Assistant pipeline contracts: ok")
+
+# HA feedback saves are partial updates: a stale Audio page must never resend
+# an old pipeline mode, and the OpenAPI schema must permit the same request.
+voice_put = openapi["paths"]["/voice-pipeline"]["put"]["requestBody"]["content"]["application/json"]["schema"]
+assert "mode" not in voice_put.get("required", [])
+assert voice_put["properties"]["home_assistant_chimes"]["type"] == "boolean"

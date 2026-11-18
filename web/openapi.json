@@ -5050,9 +5050,6 @@
       "application/json": {
        "schema": {
         "type": "object",
-        "required": [
-         "mode"
-        ],
         "properties": {
          "mode": {
           "type": "string",

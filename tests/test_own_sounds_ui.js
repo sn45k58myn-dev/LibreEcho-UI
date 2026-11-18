@@ -107,8 +107,8 @@ function section(html,id){
   document.querySelector('#ha-voice-chimes').checked=false;
   document.querySelector('#save-ha-voice-chimes').onclick();
   assert.deepStrictEqual(requests,[
-    {path:'/voice-pipeline',body:{mode:'home-assistant',home_assistant_chimes:true}},
-    {path:'/voice-pipeline',body:{mode:'home-assistant',home_assistant_chimes:false}}]);
+    {path:'/voice-pipeline',body:{home_assistant_chimes:true}},
+    {path:'/voice-pipeline',body:{home_assistant_chimes:false}}]);
   console.log('  HA listening chimes: optional panel, default off, save on/off: ok');
 
 
