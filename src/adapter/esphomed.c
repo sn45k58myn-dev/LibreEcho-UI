@@ -47,6 +47,10 @@
 /* Separate reply volume (#409): a 0-100 % config number in Home Assistant. */
 #define REPLY_KEY 50U
 #define JOB_REPLY 14
+#define JOB_VOICE_CHIME 17
+#if JOB_VOICE_CHIME == JOB_REPLY || JOB_VOICE_CHIME == LE_BLE_JOB_LEASE || JOB_VOICE_CHIME == LE_BLE_JOB_POLL
+#error "HA chimes need an independent adapter job kind"
+#endif
 /* Ambient light (#392): the board's TSL2540 lux as an HA illuminance sensor.
  * Read at most once a second, published on a real change (5% or 1 lx) or,
  * for smaller drift, at most once a minute -- never more than ~1/s per client. */
@@ -120,6 +124,8 @@ struct state {
  int16_t ring[RING_SAMPLES];unsigned char mic_rx[24+2560];size_t mic_n;int mic_ack;
  /* Optional noise suppression on the speech sent to Home Assistant (#401), off unless web-config says voice_noise_suppression. It runs on every frame so the noise estimate is settled when a turn starts. */
  int noise_suppression;struct le_voice_ns ns;
+ /* Optional HA feedback (#540); idle server-wake streaming is always silent. */
+ int voice_chimes,voice_chime_started;
  char conversation[128],tts_url[1024],next_url[1024],result[24];int continue_turn,run_end,early_tts,playing,announcement,pipeline,tts_done,timer_pending;
  time_t result_time;struct esp_playback playback;int mdns_fd;
  char process_start[32],boot_id[64],listener_inode[32];unsigned listener_port;
@@ -311,11 +317,19 @@ static void all_states(void){for(unsigned i=0;i<CLIENTS;i++)if(S.clients[i].fd>=
 #define LE_DND_PATH "/data/libreecho/config/do-not-disturb"
 #endif
 static int dnd_on(void){char t[8];ssize_t n;int fd=open(LE_DND_PATH,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);if(fd<0)return 0;n=read(fd,t,sizeof t-1);close(fd);if(n<=0)return 0;t[n]=0;return !strcmp(t,"on\n")||!strcmp(t,"on");}
+/* Use the normal audiod path: it honours DND and the owner's uploaded sounds.
+ * Best effort and nonblocking; a missing/busy adapter must never prevent voice.
+ * PCM remains on the existing post-AEC stream, without sleeps or a capture gap. */
+static void voice_chime(int wake){if(!S.voice_chimes||dnd_on())return;
+ (void)job(S.audio_path,wake?"wake_chirp":"event_sound",wake?"{}":"{\"event\":\"end\"}",JOB_VOICE_CHIME,0);}
+static void voice_chime_start(void){if(S.voice_chime_started)return;S.voice_chime_started=1;voice_chime(1);}
 static int announce_done(int success){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,1,(unsigned)success);return S.owner>=0?send_writer(&S.clients[S.owner],120,&w):-1;}
-static void capture_end(void){if(S.turn==2&&S.owner>=0){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,2,1);(void)send_writer(&S.clients[S.owner],106,&w);}if(S.turn==1||S.turn==2){S.turn=3;event_send(ACTIVITY_VOICE_KEY,"thinking");}profile("thinking");}
+static void capture_end(void){if(S.turn==2&&S.owner>=0){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,2,1);(void)send_writer(&S.clients[S.owner],106,&w);}if(S.turn==1||S.turn==2){S.turn=3;if(S.pipeline&&S.voice_chime_started)voice_chime(0);event_send(ACTIVITY_VOICE_KEY,"thinking");}profile("thinking");}
 /* Playback ends through turn_clear or the tick; report it once, when S.playing drops. */
 static void playback_stopped(void){if(!S.playing)return;S.playing=0;event_send(ACTIVITY_PLAYBACK_KEY,"stopped");}
-static void turn_clear(const char *result,int notify){int active=S.turn||S.playing,server=S.server_turn;if(notify)(void)announce_done(0);playback_stopped();esp_playback_close(&S.playback);S.playing=S.turn=S.continue_turn=S.run_end=S.early_tts=S.announcement=S.pipeline=S.tts_done=S.server_turn=0;S.next_url[0]=S.tts_url[0]=S.conversation[0]=0;snprintf(S.result,sizeof S.result,"%s",result);S.result_time=time(NULL);
+static void turn_clear(const char *result,int notify){int active=S.turn||S.playing,server=S.server_turn;if(notify)(void)announce_done(0);playback_stopped();esp_playback_close(&S.playback);S.playing=S.turn=S.continue_turn=S.run_end=S.early_tts=S.announcement=S.pipeline=S.tts_done=S.server_turn=0;S.voice_chime_started=0;
+ if(strcmp(result,"success"))for(unsigned i=0;i<JOBS;i++)if(S.jobs[i].kind==JOB_VOICE_CHIME&&!S.jobs[i].tx_sent)io_close(&S.jobs[i]);
+ S.next_url[0]=S.tts_url[0]=S.conversation[0]=0;snprintf(S.result,sizeof S.result,"%s",result);S.result_time=time(NULL);
  /* A server-wake stream ends by timeout or HA error; retry after a second so a rejected run cannot spin. */
  if(server)S.server_retry=S.now+1000;
  /* One voice event per opened turn (wake, announcement or continued turn). */
@@ -342,7 +356,7 @@ static int voice_start(uint64_t sample,int continued){unsigned char b[256];struc
     already detected here, so HA must start at STT -- with no HA wake engine the
     run otherwise fails instantly with wake-engine-missing. */
  ep_uint(&w,3,1);if(!continued)ep_string(&w,5,"Alexa");if(send_writer(&S.clients[S.owner],90,&w))return -1;
- S.capture_next=sample>3200?sample-3200:0;if(S.capture_next<S.ring_first)S.capture_next=S.ring_first;S.turn=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=S.run_end=S.early_tts=S.tts_done=0;S.tts_url[0]=S.next_url[0]=0;S.announcement=0;S.pipeline=1;S.voice_open=1;if(!continued)event_send(ACTIVITY_VOICE_KEY,"wake_word");event_send(ACTIVITY_VOICE_KEY,"listening");profile("listening");status_write();return 0;
+ S.capture_next=sample>3200?sample-3200:0;if(S.capture_next<S.ring_first)S.capture_next=S.ring_first;S.turn=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=S.run_end=S.early_tts=S.tts_done=0;S.tts_url[0]=S.next_url[0]=0;S.announcement=0;S.pipeline=1;S.voice_chime_started=0;voice_chime_start();S.voice_open=1;if(!continued)event_send(ACTIVITY_VOICE_KEY,"wake_word");event_send(ACTIVITY_VOICE_KEY,"listening");profile("listening");status_write();return 0;
 }
 /* Server-side wake (esphome_server_wake, off by default): open an ESPHome run with
  * USE_VAD|USE_WAKE_WORD and no phrase, then stream the mic continuously so Home
@@ -352,7 +366,7 @@ static int server_listen_start(void){unsigned char b[160];struct ep_writer w={b,
  if(!S.server_wake||!S.ha_selected||S.owner<0||S.turn||mic_muted()||S.now<S.server_retry)return -1;
  ep_uint(&w,1,1);ep_string(&w,2,S.conversation);ep_uint(&w,3,3);if(send_writer(&S.clients[S.owner],90,&w)){S.server_retry=S.now+1000;return -1;}
  from=S.ring_end>16000?S.ring_end-16000:0;if(from<S.ring_first)from=S.ring_first;S.capture_next=from;
- S.turn=1;S.server_turn=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=S.run_end=S.early_tts=S.tts_done=0;S.tts_url[0]=S.next_url[0]=0;S.announcement=0;S.pipeline=1;profile("listening");status_write();return 0;
+ S.turn=1;S.server_turn=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=S.run_end=S.early_tts=S.tts_done=0;S.tts_url[0]=S.next_url[0]=0;S.announcement=0;S.pipeline=1;S.voice_chime_started=0;profile("listening");status_write();return 0;
 }
 static int playback_start(const char *url){if(!url[0]||S.playing)return -1;if(esp_playback_start(&S.playback,url,S.bus_path,S.ca_path,S.now)<0){esp_playback_close(&S.playback);return -1;}S.playing=1;S.turn=4;all_states();event_send(ACTIVITY_PLAYBACK_KEY,"started");return 0;}
 /* HA may await the drain ack before RUN_END. Ack once, but keep this pipeline
@@ -488,7 +502,7 @@ static void voice_event(const void *p,size_t n){unsigned event=(unsigned)ep_get_
  if(event_data(p,n,"url",v,sizeof v)<0){cancel_turn("bad_event");return;}if(v[0])snprintf(S.tts_url,sizeof S.tts_url,"%s",v);
  /* Speech text (#398): STT_END carries the transcript, TTS_START the reply text. Published only with the owner setting. */
  if(S.speech_text&&(event==4||event==7)){char t[TEXT_VALUE_MAX];if(event_data(p,n,"text",t,sizeof t)>0)text_set(event==4?TEXT_TRANSCRIPT_KEY:TEXT_REPLY_KEY,t);}
- if(event==0){cancel_turn("ha_error");return;}if(event==12)capture_end();
+ if(event==0){cancel_turn("ha_error");return;}if(event==10&&S.server_turn&&(S.turn==1||S.turn==2))voice_chime_start();if(event==12||(S.voice_chimes&&event==4))capture_end();
  if(event==6){if(event_data(p,n,"conversation_id",S.conversation,sizeof S.conversation)<0){cancel_turn("bad_event");return;}if(event_data(p,n,"continue_conversation",v,sizeof v)<0){cancel_turn("bad_event");return;}S.continue_turn=!strcmp(v,"1");}
  if(event==100){if(event_data(p,n,"tts_start_streaming",v,sizeof v)<0){cancel_turn("bad_event");return;}S.early_tts=!strcmp(v,"1");}
  if((event==100&&S.early_tts)||event==8){capture_end();if(!S.playing&&!S.tts_done&&S.tts_url[0]){event_send(ACTIVITY_VOICE_KEY,"replying");if(playback_start(S.tts_url)<0){(void)announce_done(0);cancel_turn("playback_error");return;}}}
@@ -671,6 +685,8 @@ static int load_configuration(void){char b[16384],key[45],mac[64],name[64],wake[
  {int ble=0;(void)json_get_bool(b,"esphome_bluetooth_proxy",&ble);S.ble_proxy=ble>0;if(!S.ble_proxy)for(unsigned i=0;i<(unsigned)(sizeof S.clients/sizeof S.clients[0]);i++)le_ble_proxy_close(&B,(int)i);}
  /* Room level sensor (#399) is off unless the owner sets esphome_room_level_sensor; a reload restarts the window. */
  {int room=0;(void)json_get_bool(b,"esphome_room_level_sensor",&room);S.room_level_sensor=room!=0;S.level_known=S.level_sent_ok=0;S.level_n=0;S.level_sum=0;}
+ /* Opt-in feedback is disabled for absent, malformed or duplicate fields. */
+ {int on=0;S.voice_chimes=json_get_top_level_bool(b,(size_t)n,"esphome_voice_chimes",&on)==1&&on;}
  /* esphome_server_wake: Home Assistant runs wake detection on a continuous stream. Absent or invalid means off. */
  {int server=0;S.server_wake=json_get_bool(b,"esphome_server_wake",&server)>0&&server;}
  /* HA ownership is what the web API persists: integrations bit 1 or the

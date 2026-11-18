@@ -149,6 +149,28 @@ from the stopped run can never attach to a new one. `buttond` reaches
 `/run/libreecho/esphome-control.sock` (`--control-socket`); the only command is
 `cancel`, and it does nothing when no request is in progress.
 
+## Optional listening chimes
+
+On **Audio**, enable **Listening chimes** under **Home Assistant voice feedback**
+to hear the device mark each HA request. It is off by default. The wake cue uses
+your selected `wake` sound, falling back to audiod's built-in chirp. The end cue
+uses your selected `end` sound; without an uploaded end sound it stays silent.
+Both use the normal non-preview sound path and honour Do not disturb.
+
+The cue starts once per listening turn, including a button-started turn and a
+continued conversation. In server-wake mode the idle stream is silent; the wake
+cue waits for HA's `WAKE_WORD_END`. The end cue follows the first STT/VAD-end
+transition to processing. Duplicate stage events do not repeat it. Adapter
+requests are best effort through the bounded asynchronous queue: a missing or
+busy audiod never delays or cancels capture. There are no sleeps or capture
+pauses; speech stays on the existing post-AEC microphone path. Acoustic
+acceptance must check audible cues and unaffected HA transcripts on both
+Radar and Dot before release; host event tests cannot establish echo rejection.
+
+The API is `PUT /api/v1/voice-pipeline` with `home_assistant_chimes: true|false`;
+GET reports `home_assistant.chimes`. It is persisted as `esphome_voice_chimes`
+and applies on the normal voice-pipeline restart (or daemon config reload).
+
 ## Server-side wake word (optional, off by default)
 
 By default the wake word is detected on the device by `waked`, and that stays

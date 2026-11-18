@@ -27,7 +27,7 @@ body = api[start:end]
 assert "network_pipeline" not in body, "custom endpoints must not be probed in HA mode"
 assert body.count("custom &&") == 2
 assert body.index("esphome_satellite_ready()") > body.index("home_assistant =")
-assert r'\"home_assistant\":{\"protocol\":\"esphome\",\"port\":6053,\"ready\":%s,\"connected\":%s}' in body
+assert r'\"home_assistant\":{\"protocol\":\"esphome\",\"port\":6053,\"ready\":%s,\"connected\":%s,\"chimes\":%s}' in body
 
 # Readiness uses the shared bounded process/status/listener verifier. A pidfile
 # alone, forged argv[0], stale JSON or an unrelated listener is not readiness.
