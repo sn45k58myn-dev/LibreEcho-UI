@@ -195,6 +195,12 @@ TTS PCM instead of URL playback. The connection uses Noise; there is no legacy
 AuthRequest gate. Conversation continuation metadata is handled at `INTENT_END`,
 not `RUN_END`.
 
+Home Assistant may reserve a reply URL at `RUN_START` even when the intent
+produces no spoken response. Such a turn finishes at `RUN_END` without fetching
+that URL; the ring returns to idle and another wake word can start a new turn.
+For a spoken response, both `RUN_END` and actual audio drain are required before
+the turn finishes or conversation continuation begins.
+
 Replies stream. When the pipeline's TTS accepts streamed text, Home Assistant
 sends `tts_start_streaming` once the conversation agent has written about 60
 characters. The device then opens the reply URL and plays the WAV or MP3 while

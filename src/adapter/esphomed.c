@@ -492,7 +492,9 @@ static void voice_event(const void *p,size_t n){unsigned event=(unsigned)ep_get_
  if(event==6){if(event_data(p,n,"conversation_id",S.conversation,sizeof S.conversation)<0){cancel_turn("bad_event");return;}if(event_data(p,n,"continue_conversation",v,sizeof v)<0){cancel_turn("bad_event");return;}S.continue_turn=!strcmp(v,"1");}
  if(event==100){if(event_data(p,n,"tts_start_streaming",v,sizeof v)<0){cancel_turn("bad_event");return;}S.early_tts=!strcmp(v,"1");}
  if((event==100&&S.early_tts)||event==8){capture_end();if(!S.playing&&!S.tts_done&&S.tts_url[0]){event_send(ACTIVITY_VOICE_KEY,"replying");if(playback_start(S.tts_url)<0){(void)announce_done(0);cancel_turn("playback_error");return;}}}
- if(event==2){S.run_end=1;if(!S.playing&&(S.tts_done||!S.tts_url[0])){capture_end();completed();}}
+ /* RUN_START reserves a TTS URL even when the intent produces no speech.
+  * Only actual playback must drain before RUN_END can finish the turn. */
+ if(event==2){S.run_end=1;if(!S.playing){capture_end();completed();}}
 }
 /*
  * Time zone from Home Assistant (#371). Like an ESPHome `time: platform:
