@@ -74,7 +74,8 @@ with tempfile.TemporaryDirectory(prefix="test-esphome-http-", dir=SCRATCH) as di
                 status, result = request("/voice-pipeline")
                 assert status == 200 and result["data"]["mode"] == "home-assistant"
                 assert result["data"]["home_assistant"] == {"protocol": "esphome", "port": 6053,
-                                                            "ready": False, "connected": False}
+                                                            "ready": False, "connected": False,
+                                                            "chimes": False}
                 stored = json.loads(config.read_text())
                 assert stored["ha_protocol"] == "esphome" and stored["esphome_noise_key"] == KEY
                 assert stored["voice_pipeline_previous_mode"] == mode
