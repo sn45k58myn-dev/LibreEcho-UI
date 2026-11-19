@@ -1789,7 +1789,7 @@
         "timer"
        ]
       },
-      "description": "wake: listening chime (local assistant); end: finished-listening chime (local assistant; no built-in sound); timer: timer and alarm ring."
+      "description": "wake: listening chime (local assistant and opt-in HA feedback); end: finished-listening chime (local assistant and opt-in HA feedback; no built-in sound); timer: timer and alarm ring."
      },
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1853,7 +1853,7 @@
         "timer"
        ]
       },
-      "description": "wake: listening chime (local assistant); end: finished-listening chime (local assistant; no built-in sound); timer: timer and alarm ring."
+      "description": "wake: listening chime (local assistant and opt-in HA feedback); end: finished-listening chime (local assistant and opt-in HA feedback; no built-in sound); timer: timer and alarm ring."
      },
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1896,7 +1896,7 @@
         "timer"
        ]
       },
-      "description": "wake: listening chime (local assistant); end: finished-listening chime (local assistant; no built-in sound); timer: timer and alarm ring."
+      "description": "wake: listening chime (local assistant and opt-in HA feedback); end: finished-listening chime (local assistant and opt-in HA feedback; no built-in sound); timer: timer and alarm ring."
      },
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1968,7 +1968,7 @@
         "timer"
        ]
       },
-      "description": "wake: listening chime (local assistant); end: finished-listening chime (local assistant; no built-in sound); timer: timer and alarm ring."
+      "description": "wake: listening chime (local assistant and opt-in HA feedback); end: finished-listening chime (local assistant and opt-in HA feedback; no built-in sound); timer: timer and alarm ring."
      },
      {
       "$ref": "#/components/parameters/Csrf"
@@ -5050,9 +5050,6 @@
       "application/json": {
        "schema": {
         "type": "object",
-        "required": [
-         "mode"
-        ],
         "properties": {
          "mode": {
           "type": "string",
@@ -5092,6 +5089,11 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 1024
+         },
+         "home_assistant_chimes": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt in to wake and finished-listening chimes for HA voice turns; saved as esphome_voice_chimes. Normal sounds honour DND; idle server-wake streams stay silent. Applies after the voice pipeline restart."
          },
          "noise_suppression": {
           "type": "boolean",
@@ -6918,6 +6920,11 @@
          "port": {
           "type": "integer",
           "enum": [6053]
+         },
+         "chimes": {
+          "type": "boolean",
+          "default": false,
+          "description": "Persisted opt-in HA wake/end chimes setting, including while HA mode is disabled."
          },
          "connected": {
           "type": "boolean"

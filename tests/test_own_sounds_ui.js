@@ -90,6 +90,28 @@ function section(html,id){
     'an image without the sounds API still renders the Audio page');
   console.log('  Audio page survives a daemon without /sounds: ok');
 
+  const chimePanel = vm.runInThisContext('haVoiceChimesPanel');
+  const bindChimes = vm.runInThisContext('bindHaVoiceChimes');
+  assert.strictEqual(chimePanel(null),'');
+  assert.strictEqual(chimePanel({home_assistant:{}}),'','older APIs do not invent an available setting');
+  const off = chimePanel({mode:'local',home_assistant:{chimes:false}});
+  const on = chimePanel({mode:'home-assistant',home_assistant:{chimes:true}});
+  assert(off.includes('Home Assistant voice feedback') && off.includes('Do not disturb'));
+  assert(/id="ha-voice-chimes"[^>]*checked/.test(on));
+  assert(!/id="ha-voice-chimes"[^>]*checked/.test(off),'default remains off');
+  const requests=[];
+  globalThis.mutate=(path,body)=>requests.push({path,body});
+  bindChimes({mode:'home-assistant',home_assistant:{chimes:false}});
+  document.querySelector('#ha-voice-chimes').checked=true;
+  document.querySelector('#save-ha-voice-chimes').onclick();
+  document.querySelector('#ha-voice-chimes').checked=false;
+  document.querySelector('#save-ha-voice-chimes').onclick();
+  assert.deepStrictEqual(requests,[
+    {path:'/voice-pipeline',body:{home_assistant_chimes:true}},
+    {path:'/voice-pipeline',body:{home_assistant_chimes:false}}]);
+  console.log('  HA listening chimes: optional panel, default off, save on/off: ok');
+
+
   const toWav = vm.runInThisContext('soundPcmToWav');
   const wav = toWav(Float32Array.from([0, 1, -1, 2, -0.5]));
   const view = new DataView(wav.buffer);

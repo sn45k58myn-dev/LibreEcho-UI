@@ -16,6 +16,7 @@
   "wake_enabled": true,
   "wake_sensitivity": 68,
   "voice_pipeline_mode": "local",
+  "esphome_voice_chimes": false,
   "stt_wyoming_uri": "",
   "stt_wyoming_model": "whisper-small",
   "tts_wyoming_uri": "",

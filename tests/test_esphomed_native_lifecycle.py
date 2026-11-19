@@ -14,9 +14,11 @@ import socket
 import struct
 import sys
 import termios
+import threading
 import time
 import unittest
 import wave
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.environ.get('ESPHOMED_FIXTURE_TESTS', str(Path(__file__).parent)))
@@ -205,6 +207,81 @@ class NativeLifecycle(unittest.TestCase):
         self.assertEqual(sum(kind == 90 for kind, _ in messages), 1)
         self.assertIn((106, fixture.num(2, 1)), messages)
         self.assertEqual(sum(kind == 120 for kind, _ in messages), 1)
+
+    @contextlib.contextmanager
+    def reserved_tts_url(self):
+        # HA reserves a streaming URL at RUN_START, before it knows whether
+        # the intent will have any speech. It must never be fetched here.
+        requests = []
+
+        class HTTP(BaseHTTPRequestHandler):
+            def do_GET(self):
+                requests.append(self.path)
+                self.send_response(500)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), HTTP)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            yield f'http://127.0.0.1:{server.server_port}/reserved.wav', requests
+        finally:
+            server.shutdown()
+            thread.join(2)
+            server.server_close()
+
+    def test_reserved_tts_url_without_speech_finishes_and_accepts_next_wake(self):
+        self.owner()
+        self.start_voice()
+        self.s.sendall(fixture.frame(20))
+        self.barrier()
+        led_before = len(self.adapters['led'].calls)
+        with self.reserved_tts_url() as (url, requests):
+            self.s.sendall(self.event(1, url=url)+self.event(12)+
+                           self.event(6, conversation_id='silent-turn', continue_conversation='0', speech='')+
+                           self.event(2))
+            messages = self.barrier()+self.messages_for(.2)
+            status = json.loads((self.p/'status.json').read_text())
+            self.assertFalse(status['in_progress'], 'a reserved URL is not pending TTS')
+            self.assertEqual(status['last_result'], 'success')
+            self.assertEqual([(kind, body) for kind, body in messages if kind == 120],
+                             [(120, fixture.num(1, 1))])
+            self.assertIn((106, fixture.num(2, 1)), messages, 'capture must close')
+            self.assertEqual(sum(kind == 108 and fixture.text(2, 'finished') in body
+                                 for kind, body in messages), 1)
+            self.assertTrue(any(call['cmd'] == 'pattern' and
+                                call['args'].get('name') == 'stop' and
+                                call['args'].get('owner') == 'esphome'
+                                for call in self.adapters['led'].calls[led_before:]), 'release the thinking ring')
+            self.assertEqual(requests, [])
+            with contextlib.suppress(BlockingIOError):
+                self.busbytes += os.read(self.busfd, 65536)
+            self.assertFalse(self.sound(), 'no reply audio for a silent intent')
+            self.start_voice()
+            self.assertTrue(json.loads((self.p/'status.json').read_text())['in_progress'])
+
+    def test_reserved_tts_url_without_speech_can_continue_once(self):
+        self.owner()
+        self.start_voice()
+        with self.reserved_tts_url() as (url, requests):
+            self.s.sendall(self.event(1, url=url)+self.event(12)+
+                           self.event(6, conversation_id='silent-continuation', continue_conversation='1', speech='')+
+                           self.event(2))
+            messages = self.barrier()+self.messages_for(.2)
+            starts = [body for kind, body in messages if kind == 90]
+            self.assertEqual(len(starts), 1)
+            self.assertIn(fixture.text(2, 'silent-continuation'), starts[0])
+            self.assertEqual(sum(kind == 120 for kind, _ in messages), 1)
+            self.assertEqual(requests, [])
+            with contextlib.suppress(BlockingIOError):
+                self.busbytes += os.read(self.busfd, 65536)
+            self.assertFalse(self.sound())
+            self.s.sendall(fixture.frame(91))
+            self.barrier()
+            self.assertTrue(json.loads((self.p/'status.json').read_text())['in_progress'])
 
     def test_standalone_preannounce_start_conversation_needs_no_run_end(self):
         self.owner()

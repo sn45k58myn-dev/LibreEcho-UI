@@ -903,8 +903,10 @@ built-in sound.
 | `end` | when the local assistant stops listening | none | 2000 ms |
 | `timer` | while a timer or alarm rings | the two-tone ring | 5000 ms |
 
-The `wake` and `end` chimes belong to the local assistant pipeline. The Home
-Assistant (ESPHome) path stays visual-only, as before. A timer sound longer
+The `wake` and `end` chimes belong to the local assistant pipeline and, when
+`home_assistant_chimes` is enabled through `/voice-pipeline`, the Home Assistant
+(ESPHome) path. Home Assistant feedback is off by default and respects Do not
+disturb. A timer sound longer
 than the two-second ring period plays back to back. Dismissing the timer stops
 it: the writer ends on a faded chunk, and what is already queued for the
 speaker (at most about a third of a second) plays out. The speaker can take
@@ -1003,6 +1005,13 @@ speech recognition. It is a short-time Wiener filter (256-point frames, 15 dB
 deepest cut, 16 ms added delay) that runs after echo cancellation; the wake
 word keeps hearing the unsuppressed audio. Changing it restarts the voice
 pipeline like the other listening fields.
+
+`home_assistant.chimes` reports the persisted HA feedback preference (default
+`false`), even outside Home Assistant mode. Set `home_assistant_chimes` to a
+boolean with PUT; invalid or duplicate values return 400 before any change.
+It is stored as `esphome_voice_chimes` and follows the pipeline's normal
+persistence, restart and rollback path. The Audio page exposes this as
+**Home Assistant voice feedback → Listening chimes** next to **Your own sounds**.
 
 #### PUT /api/v1/voice-pipeline
 

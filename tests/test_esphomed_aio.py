@@ -92,8 +92,10 @@ class PinnedFixture(Fixture):
    try:
     await client.connect(login=True);client.subscribe_states(lambda state:None)
     await self.wait_for(lambda:json.loads(self.config.read_text()).get('timezone')!='UTC','time zone from GetTimeResponse')
-    stored=json.loads(self.config.read_text());self.assertEqual(stored['timezone'],'CST6CDT,M3.2.0,M11.1.0');self.assertEqual(stored['timezone_name'],'')
+    # The daemon writes the zone and its cleared name in separate atomic
+    # transactions. Its next native reply is a barrier after both writes.
     await client._get_connection().send_message_await_response(PingRequest(),PingResponse)
+    stored=json.loads(self.config.read_text());self.assertEqual(stored['timezone'],'CST6CDT,M3.2.0,M11.1.0');self.assertEqual(stored['timezone_name'],'')
    finally:await client.disconnect(force=True)
   asyncio.run(asyncio.wait_for(run(),12))
  def test_pinned_noise_provision_reconnect_wrong_key(self):

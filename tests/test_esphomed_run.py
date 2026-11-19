@@ -46,6 +46,7 @@ with tempfile.TemporaryDirectory(prefix='esphomed-suite-',dir=scratch) as direct
   'queue':['tests/test_esphomed_queue.c']+common,
   'timer-lifecycle':['tests/test_esphomed_timer_lifecycle.c']+common,
   'idle':['tests/test_esphomed_idle.c']+common,
+  'chimes':['tests/test_esphomed_chimes.c']+common,
  }
  for name,sources in cases.items():
   binary=d/name;run(flags+sources+libs+['-o',binary])
@@ -55,6 +56,8 @@ with tempfile.TemporaryDirectory(prefix='esphomed-suite-',dir=scratch) as direct
   elif name=='idle':
    for case in ['quiet-owner-pinged','silent-owner-dropped','idle-disconnect-no-error-flash','active-turn-disconnect-flashes']:
     with tempfile.TemporaryDirectory(prefix='idle-',dir=d) as private:run([binary,case,private],env)
+  elif name=='chimes':
+   with tempfile.TemporaryDirectory(prefix='chimes-',dir=d) as private:run([binary,private],env)
   else:run([binary],env)
  run([sys.executable,'tests/test_esphome_ffmpeg_wav.py','--http-fixture',d/'http'],env)
  run([sys.executable,'tests/test_esphomed.py'],env)

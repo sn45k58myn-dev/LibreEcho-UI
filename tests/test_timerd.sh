@@ -111,6 +111,13 @@ rmin=$(date '+%-M')
 out=$(call add_reminder "{\"hour\":$rh,\"minute\":$rmin,\"days\":0,\"label\":\"pills\"}")
 case "$out" in *'"id":'*) ;; *) echo "FAIL: reminder not added: $out"; exit 1 ;; esac
 reminder_id=$(printf '%s' "$out" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+# The command reply precedes timerd's asynchronous state write. Wait at most
+# two seconds for the same exact record check; a missing write still fails.
+waited=0
+while ! grep -q '^v5 reminder ' "$state" 2>/dev/null && [ "$waited" -lt 20 ]; do
+    sleep 0.1
+    waited=$((waited+1))
+done
 grep -q '^v5 reminder ' "$state" || { echo "FAIL: reminder not persisted as a v5 record"; cat "$state"; exit 1; }
 stop_daemon
 start_daemon

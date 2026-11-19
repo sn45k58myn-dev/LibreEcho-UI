@@ -453,6 +453,7 @@ sh tests/test_timed_timeout.sh
 make build/libreecho-web
 # Owns its own port and private sound directory.
 sh tests/test_event_sounds_api.sh
+sh tests/test_ha_voice_chimes_api.sh
 # Device list (#413): browse and advertisement through the real daemon, own ports.
 python3 tests/test_network_peers.py
 python3 tests/test_peer_pairing.py

@@ -62,13 +62,26 @@ static void expect(int fd, int status, const char *text) {
     snprintf(expected,sizeof(expected),"HTTP/1.1 %d",status);
     if (!strstr(reply,expected) || (text && !strstr(reply,text))) { fprintf(stderr,"Unexpected response: %s\n",reply); abort(); }
 }
-static int raw_request(struct api_context *api,const char *request) {
+static int raw_request(struct api_context *api,const char *request,size_t expected_drain) {
     int pair[2]; struct client c; struct http_options o; struct timeval limit={3,0};
+    long long started=send_now_ms();
+    assert(started>=0);
     assert(socketpair(AF_UNIX,SOCK_STREAM,0,pair)==0);
     assert(setsockopt(pair[1],SOL_SOCKET,SO_RCVTIMEO,&limit,sizeof(limit))==0);
     memset(&c,0,sizeof(c)); memset(&o,0,sizeof(o)); c.fd=pair[0]; strcpy(o.web_root,"web");
     c.used=strlen(request); assert(c.used<sizeof(c.buf)); memcpy(c.buf,request,c.used+1);
-    process(&c,&o,api,-1,-1,-1,NULL,0); assert(c.fd==-1); return pair[1];
+    process(&c,&o,api,-1,-1,-1,NULL,0);
+    if(expected_drain){
+        assert(c.fd==pair[0] && c.drain_remaining==expected_drain);
+        assert(expected_drain<=LE_UPDATE_MAX_BYTES && c.used==0 && c.buf[0]==0);
+        assert(c.started_ms>=(unsigned long long)started &&
+               c.started_ms<=(unsigned long long)send_now_ms());
+        assert(LE_REJECT_DRAIN_TIMEOUT_MS==1000);
+        /* This isolated process() fixture has no poll loop. The real TCP
+           client-state test verifies draining and the absolute close cap. */
+        close(c.fd);client_clear(&c);
+    }
+    assert(c.fd==-1 && c.drain_remaining==0); return pair[1];
 }
 static void expect_exact_error(int fd,int status,const char *body) {
     char reply[40000],expected[32],length[64]; size_t used=0,body_len=strlen(body); ssize_t n; char *separator;
@@ -105,8 +118,8 @@ int main(void) {
         const char headers_error[]="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"headers_too_large\",\"message\":\"Request headers exceed 8 KiB\"}}";
         const char body_error[]="{\"ok\":false,\"data\":null,\"error\":{\"code\":\"body_too_large\",\"message\":\"Request body exceeds 16 KiB\"}}";
         assert(snprintf(oversized_headers,sizeof(oversized_headers),"GET / HTTP/1.1\r\nHost: local\r\nX-Pad: %09000d\r\n\r\n",0)>LE_HEADER_MAX);
-        expect_exact_error(raw_request(&api,oversized_headers),413,headers_error);
-        expect_exact_error(raw_request(&api,"POST /api/v1/test HTTP/1.1\r\nHost: local\r\nContent-Length: 16385\r\n\r\n"),413,body_error);
+        expect_exact_error(raw_request(&api,oversized_headers,0),413,headers_error);
+        expect_exact_error(raw_request(&api,"POST /api/v1/test HTTP/1.1\r\nHost: local\r\nContent-Length: 16385\r\n\r\n",16385),413,body_error);
     }
     api.integrations |= 2u | 64u; /* Unrelated existing choices (MQTT, Sendspin) must survive setup. */
     strcpy(auth,api.auth_token);
