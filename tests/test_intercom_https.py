@@ -122,7 +122,7 @@ with tempfile.TemporaryDirectory(prefix="intercom-https-", dir=os.environ.get("T
         assert api("/intercom", "PUT", dict(enabled=True), extra={"X-LibreEcho-CSRF": "wrong"})[0] == 403
         assert api("/intercom", "PUT", dict(enabled=True))[0] == 200
         code, data = api("/intercom/call", "POST", {})
-        assert code == 201
+        assert code == 201, data
         ticket = data["data"]["ticket"]
         bad, head = upgrade("https://another.test")
         assert head.startswith(b"HTTP/1.1 403")

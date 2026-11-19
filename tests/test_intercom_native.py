@@ -154,6 +154,15 @@ with tempfile.TemporaryDirectory(prefix="intercom-native-", dir=os.environ.get("
 
         refused()  # Default off.
         permission.write_text('{"enabled":true}')
+        status["output_available"] = False
+        refused()
+        del status["output_available"]
+        refused()
+        status["output_available"] = True
+        for level in ("volume", "notification_volume"):
+            status[level] = 0
+            refused()
+            status[level] = 50
         status["do_not_disturb"] = True
         refused()
         status["do_not_disturb"] = False

@@ -754,6 +754,11 @@ static void ensure_voice_pipeline_config(struct api_context *c)
         c->integrations|=1u;c->privacy_local_only=0;
      }}
 }
+int api_home_assistant_selected(struct api_context *c)
+{
+    ensure_voice_pipeline_config(c);
+    return !strcmp(c->voice_pipeline_mode, "home-assistant");
+}
 /*
  * Endpointing tunables for libreecho-sttd.  The ranges mirror the ones
  * stt_engine_wyoming.c enforces, so a value accepted here cannot be

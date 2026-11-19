@@ -81,9 +81,9 @@ Phone-to-room PCM is converted by the existing streaming resampler to the
 48 kHz stereo system bus. A single bounded pending output block is allowed.
 Room-to-phone PCM validates indexed frames and packs them into 20 ms packets.
 Missing samples, overrun, lost acknowledgement, three seconds without incoming
-phone PCM, EOF, a device gate change or process termination removes the lease,
+phone PCM, EOF, a device gate change or normal process termination removes the lease,
 stops only the intercom ring owner, closes both audio paths and drops queued
-call bytes. The finite ring expires even if the companion is killed.
+call bytes. An abrupt kill leaves only its expiring lease. The finite ring expires even if the companion is killed.
 
 Test overrides select private Unix/FIFO/config/privacy/lease paths. Production
 startup uses fixed local defaults. Extending this interface to another board

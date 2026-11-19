@@ -11,6 +11,7 @@ static char test_socket_path[108];
  * must stand even when the development API would authorize everything. */
 int api_request_authorize(struct api_context *c, const struct api_request *q,
                           struct api_response *r) { (void)c; (void)q; (void)r; return 1; }
+int api_home_assistant_selected(struct api_context *c) { return !strcmp(c->voice_pipeline_mode,"home-assistant"); }
 static void masked(unsigned char *out, const void *data, size_t n, unsigned op, size_t *size)
 {
     size_t i, h = n < 126 ? 2 : 4; out[0] = (unsigned char)(128u | op);

@@ -128,7 +128,7 @@ int le_ic_api(struct api_context *c, const struct api_request *q, struct api_res
         else { le_ic_close(); reply(r, 200, "{\"ended\":true}", NULL); } return 1;
     }
     if (!strcmp(q->path, "/api/v1/intercom/call") && !strcmp(q->method, "POST")) {
-        if (!enabled(c) || c->do_not_disturb || strcmp(c->voice_pipeline_mode, "home-assistant")) {
+        if (!enabled(c) || c->do_not_disturb || !api_home_assistant_selected(c)) {
             reply(r, 409, NULL, "Enable speaker calling, turn off Do Not Disturb, and select Home Assistant voice"); return 1;
         }
         if (call.expires || call.ws >= 0) { reply(r, 409, NULL, "The speaker already has a call"); return 1; }
@@ -198,7 +198,7 @@ void le_ic_tick(struct api_context *c, const struct pollfd p[2])
     uint64_t now = le_ic_now(); unsigned char frame[LE_IC_WS_MAX + 1];
     size_t z, used; unsigned op; int rc; ssize_t n; unsigned iterations;
     if (call.ws < 0) { if (call.expires && now >= call.expires) le_ic_close(); return; }
-    if (!enabled(c) || c->do_not_disturb || strcmp(c->voice_pipeline_mode, "home-assistant") ||
+    if (!enabled(c) || c->do_not_disturb || !api_home_assistant_selected(c) ||
         !login_valid(c, call.login) || (call.authenticated && now - call.started > 600000u) ||
         (!call.authenticated && now > call.auth_deadline) ||
         (call.authenticated && now - call.seen > 6000u) ||
