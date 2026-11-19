@@ -32,6 +32,8 @@ async function startIntercom(){
     /* Create/resume during the explicit user gesture (required by Safari). */
     call.context=new AudioContext({latencyHint:'interactive'});
     await call.context.resume();
+    if(intercomCall!==call)return;
+    if(document.hidden){stopIntercom('Call ended when this page left the foreground.');return;}
     call.context.onstatechange=()=>{if(intercomCall===call&&call.context.state!=='running')stopIntercom('Call ended because phone audio was interrupted.');};
     call.stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});
     if(intercomCall!==call){call.stream.getTracks().forEach(t=>t.stop());return;}

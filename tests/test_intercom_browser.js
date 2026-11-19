@@ -43,5 +43,10 @@ assert.equal(receive.overrun,true);assert.ok(receive.count<=1920);
   const deletion=requests.find(([,opts])=>opts.method==='DELETE');
   assert.equal(JSON.parse(deletion[1].body).id,'old-call');assert.equal(stopped,1);assert.equal(closed,1);
   listeners.pagehide(); // Repeated departure is idempotent.
+  let resumeResolve;
+  sandbox.AudioContext=class extends Context {async resume(){await new Promise(resolve=>{resumeResolve=resolve;});}};
+  const resuming=sandbox.startIntercom();assert.ok(resumeResolve);
+  sandbox.document.hidden=true;listeners.visibilitychange();resumeResolve();await resuming;
+  assert.equal(captures,1);assert.equal(closed,2); // Departure during resume cannot request capture later.
   console.log('intercom browser synthetic rate conversion, bounded queues, explicit capture and scoped late cleanup: PASS');
 })().catch(error=>{console.error(error);process.exitCode=1;});
