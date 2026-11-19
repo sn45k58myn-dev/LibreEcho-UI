@@ -22,6 +22,7 @@ assert.equal(receive.overrun,true);assert.ok(receive.count<=1920);
 (async()=>{
   const elements=new Map(),requests=[],listeners={};let grantResolve,pageResolve,captures=0,stopped=0,closed=0;
   for(const id of ['intercom-status','intercom-start','intercom-end','intercom-mute'])elements.set(id,{});
+  elements.set('intercom-permission',{checked:true});
   class Context {constructor(){this.state='running';this.audioWorklet={addModule:async()=>{}};this.destination={};}
     async resume(){}async close(){closed++;this.state='closed';}createMediaStreamSource(){return {connect(){},disconnect(){}};}}
   class Node {constructor(){this.port={postMessage(){}};}connect(){}disconnect(){}}
@@ -56,5 +57,7 @@ assert.equal(receive.overrun,true);assert.ok(receive.count<=1920);
   sandbox.state.page='Audio';sandbox.state.renderGeneration++;
   pageResolve({enabled:true,busy:false});await rendering;assert.equal(sandbox.content.innerHTML,'unchanged');
   grantResolve({ticket:'late',id:'late',path:'/api/v1/intercom/stream'});await active;
+  elements.get('intercom-permission').checked=false;elements.get('intercom-start').disabled=true;
+  listeners.pagehide();assert.equal(elements.get('intercom-start').disabled,true);
   console.log('intercom browser synthetic rate conversion, bounded queues, explicit capture and scoped late cleanup: PASS');
 })().catch(error=>{console.error(error);process.exitCode=1;});

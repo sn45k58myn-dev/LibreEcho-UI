@@ -4,7 +4,7 @@
 let intercomCall=null;
 function intercomMessage(text){const e=document.getElementById('intercom-status');if(e)e.textContent=text;}
 function stopIntercom(message='Call ended'){
-  const call=intercomCall;intercomCall=null;
+  const call=intercomCall;if(!call)return;intercomCall=null;
   if(call){
     clearInterval(call.heartbeat);clearTimeout(call.deadline);
     if(call.ws){call.ws.onclose=null;call.ws.close();}
@@ -14,8 +14,8 @@ function stopIntercom(message='Call ended'){
     if(call.ticketCreated)api('/intercom/call',{method:'DELETE',body:JSON.stringify({id:call.id})}).catch(()=>{});
   }
   intercomMessage(message);
-  const start=document.getElementById('intercom-start'),end=document.getElementById('intercom-end'),mute=document.getElementById('intercom-mute');
-  if(start)start.disabled=false;if(end)end.disabled=true;if(mute){mute.disabled=true;mute.textContent='Mute my microphone';}
+  const start=document.getElementById('intercom-start'),end=document.getElementById('intercom-end'),mute=document.getElementById('intercom-mute'),permission=document.getElementById('intercom-permission');
+  if(start)start.disabled=!!permission&&!permission.checked;if(end)end.disabled=true;if(mute){mute.disabled=true;mute.textContent='Mute my microphone';}
 }
 async function startIntercom(){
   if(intercomCall)return;
