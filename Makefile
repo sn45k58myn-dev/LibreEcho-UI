@@ -29,7 +29,7 @@ CFLAGS ?= -O2
 BUILD = build
 TARGET = $(BUILD)/libreecho-web
 LOGD_TARGET = $(BUILD)/libreecho-logd
-ADAPTER_TARGETS = $(BUILD)/libreecho-networkd $(BUILD)/libreecho-timed $(BUILD)/libreecho-audiod $(BUILD)/libreecho-micd $(BUILD)/libreecho-ledd $(BUILD)/libreecho-buttond $(BUILD)/libreecho-watchdogd $(BUILD)/libreecho-timerd $(BUILD)/libreecho-capture-mux $(BUILD)/libreecho-radiod $(BUILD)/libreecho-btd $(BUILD)/libreecho-airplayd $(BUILD)/libreecho-ttsd $(BUILD)/libreecho-sttd $(BUILD)/libreecho-agentd $(BUILD)/libreecho-esphomed $(BUILD)/libreecho-lived $(BUILD)/libreecho-sttd-wyoming $(BUILD)/libreecho-ttsd-wyoming $(BUILD)/libreecho-mdnsd
+ADAPTER_TARGETS = $(BUILD)/libreecho-intercomd $(BUILD)/libreecho-networkd $(BUILD)/libreecho-timed $(BUILD)/libreecho-audiod $(BUILD)/libreecho-micd $(BUILD)/libreecho-ledd $(BUILD)/libreecho-buttond $(BUILD)/libreecho-watchdogd $(BUILD)/libreecho-timerd $(BUILD)/libreecho-capture-mux $(BUILD)/libreecho-radiod $(BUILD)/libreecho-btd $(BUILD)/libreecho-airplayd $(BUILD)/libreecho-ttsd $(BUILD)/libreecho-sttd $(BUILD)/libreecho-agentd $(BUILD)/libreecho-esphomed $(BUILD)/libreecho-lived $(BUILD)/libreecho-sttd-wyoming $(BUILD)/libreecho-ttsd-wyoming $(BUILD)/libreecho-mdnsd
 NETWORKD_SOURCES = src/adapter/networkd.c src/adapter/network_health.c \
 	src/adapter/gateway_probe.c src/adapter/network_recovery.c \
 	src/adapter/adapter_server.c src/log.c
@@ -81,7 +81,7 @@ ESPHOMED_TLS_LIBS ?= $(if $(strip $(ESPHOMED_TLS_PREFIX)),$(ESPHOMED_TLS_PREFIX)
 ifneq ($(strip $(ESPHOMED_TLS_PREFIX)),)
 override CPPFLAGS += -I$(ESPHOMED_TLS_PREFIX)/include
 endif
-ESPHOMED_SOURCES = src/adapter/esphomed.c src/adapter/esphome_proto.c src/adapter/esphome_ble_proxy.c \
+ESPHOMED_SOURCES = src/intercom_protocol.c src/adapter/esphomed.c src/adapter/esphome_proto.c src/adapter/esphome_ble_proxy.c \
 	src/adapter/esphome_frame.c src/adapter/esphome_noise.c src/adapter/esphome_playback.c \
 	src/adapter/radio_resample.c src/adapter/mdns_client.c src/adapter/mdns_lease.c \
 	src/adapter/voice_ns.c src/config_store.c src/json.c
@@ -97,10 +97,11 @@ LIVED_SOURCES = src/adapter/lived.c src/adapter/live_session.c \
 	src/adapter/live_b64.c src/adapter/ws_client.c src/adapter/live_dns.c \
 	src/adapter/llm_store.c src/adapter/live_ha.c \
 	src/adapter/adapter_client.c src/adapter/adapter_server.c src/json.c src/log.c
+INTERCOMD_SOURCES = src/adapter/intercomd.c src/intercom_protocol.c src/adapter/radio_resample.c src/adapter/adapter_client.c src/config_store.c src/json.c src/log.c
 LOGD_SOURCES = src/logd.c src/log.c
 TLS_SOURCES = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),src/tls.c,src/tls_stub.c)
 TLS_AVAILABLE = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),1,0)
-SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/sound_store.c src/news.c src/provision.c src/update_identity.c src/diagnostic_export.c src/boot_control.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/service_env.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c src/wake_model.c src/wake_model_store.c src/peers.c src/adapter/mdns_client.c src/adapter/mdns_lease.c src/peer_auth.c src/peer_link.c src/peer_group.c src/peer_settings.c src/peer_announce.c src/adapter/timer_schedule.c src/adapter/voice_clip_store.c
+SOURCES = src/intercom.c src/intercom_protocol.c src/adapter/ws_client.c src/adapter/live_b64.c src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/sound_store.c src/news.c src/provision.c src/update_identity.c src/diagnostic_export.c src/boot_control.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/service_env.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c src/wake_model.c src/wake_model_store.c src/peers.c src/adapter/mdns_client.c src/adapter/mdns_lease.c src/peer_auth.c src/peer_link.c src/peer_group.c src/peer_settings.c src/peer_announce.c src/adapter/timer_schedule.c src/adapter/voice_clip_store.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
 NETWORKD_OBJECTS = $(NETWORKD_SOURCES:src/%.c=$(BUILD)/%.o)
 TIMED_OBJECTS = $(TIMED_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -126,6 +127,7 @@ TTSD_OBJECTS = $(TTSD_SOURCES:src/%.c=$(BUILD)/%.o)
 STTD_OBJECTS = $(STTD_SOURCES:src/%.c=$(BUILD)/%.o)
 AGENTD_OBJECTS = $(AGENTD_SOURCES:src/%.c=$(BUILD)/%.o)
 ESPHOMED_OBJECTS = $(ESPHOMED_SOURCES:src/%.c=$(BUILD)/%.o)
+INTERCOMD_OBJECTS = $(INTERCOMD_SOURCES:src/%.c=$(BUILD)/%.o)
 LIVED_OBJECTS = $(LIVED_SOURCES:src/%.c=$(BUILD)/%.o)
 LOGD_OBJECTS = $(LOGD_SOURCES:src/%.c=$(BUILD)/%.o)
 comma := ,
@@ -420,6 +422,9 @@ $(BUILD)/test-esphome-remote-timer: tests/test_esphome_remote_timer.c src/adapte
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
 		-ffunction-sections -fdata-sections $(GC_LDFLAGS) -Isrc -Isrc/adapter $< \
 		src/adapter/timer_schedule.c src/adapter/adapter_server.c src/json.c src/log.c -o $@
+
+$(BUILD)/libreecho-intercomd: $(INTERCOMD_OBJECTS)
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(INTERCOMD_OBJECTS) -o $@ -lm
 
 $(BUILD)/libreecho-lived: $(LIVED_OBJECTS) $(TLS_SOURCES:src/%.c=$(BUILD)/%.o)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(LIVED_OBJECTS) \
@@ -1470,7 +1475,7 @@ install: $(TARGET) $(LOGD_TARGET) adapters
 	install -d $(DESTDIR)$(PREFIX)/share/libreecho/sounds
 	install -m 0644 sounds/*.raw $(DESTDIR)$(PREFIX)/share/libreecho/sounds/
 	install -m 0600 config/defaults.json $(DESTDIR)/etc/libreecho/web-config.json
-	install -m 0755 init/libreecho-web.init init/libreecho-logd.init init/libreecho-networkd.init init/libreecho-timed.init init/libreecho-audiod.init init/libreecho-micd.init init/libreecho-ledd.init init/libreecho-buttond.init init/libreecho-watchdogd.init init/libreecho-timerd.init init/libreecho-radiod.init init/libreecho-btd.init init/libreecho-airplayd.init init/libreecho-ttsd.init init/libreecho-waked.init init/libreecho-sttd.init init/libreecho-agentd.init init/libreecho-esphomed.init init/libreecho-mdnsd.init init/libreecho-lived.init $(DESTDIR)/etc/init.d/
+	install -m 0755 init/libreecho-web.init init/libreecho-logd.init init/libreecho-networkd.init init/libreecho-timed.init init/libreecho-audiod.init init/libreecho-micd.init init/libreecho-ledd.init init/libreecho-buttond.init init/libreecho-watchdogd.init init/libreecho-timerd.init init/libreecho-radiod.init init/libreecho-btd.init init/libreecho-airplayd.init init/libreecho-ttsd.init init/libreecho-waked.init init/libreecho-sttd.init init/libreecho-agentd.init init/libreecho-esphomed.init init/libreecho-mdnsd.init init/libreecho-lived.init init/libreecho-intercomd.init $(DESTDIR)/etc/init.d/
 	install -m 0644 config/ntp.conf $(DESTDIR)/etc/libreecho/ntp.conf
 	install -d $(DESTDIR)/etc/libreecho/avahi-services
 	install -m 0644 config/esphome.service $(DESTDIR)/etc/libreecho/avahi-services/esphome.service
@@ -1484,7 +1489,7 @@ clean:
 	rm -f $(CAPTURE_MUX_OBJECTS) $(RADIOD_OBJECTS) $(OBJECTS) $(NETWORKD_OBJECTS) $(TIMED_OBJECTS) $(AUDIOD_OBJECTS) $(MICD_OBJECTS) $(LEDD_OBJECTS) \
 		$(LOGD_OBJECTS) $(WATCHDOGD_OBJECTS) $(BTD_OBJECTS) $(AIRPLAYD_OBJECTS) $(TTSD_OBJECTS) \
 		$(TIMERD_OBJECTS) \
-		$(STTD_OBJECTS) $(AGENTD_OBJECTS) $(ESPHOMED_OBJECTS) $(LIVED_OBJECTS) \
+		$(STTD_OBJECTS) $(AGENTD_OBJECTS) $(ESPHOMED_OBJECTS) $(LIVED_OBJECTS) $(INTERCOMD_OBJECTS) \
 		$(ADAPTER_TARGETS) \
 		$(TARGET) $(LOGD_TARGET)
 	rm -f $(BUILD)/libreecho-waked $(BUILD)/libreecho-waked-arm32 \

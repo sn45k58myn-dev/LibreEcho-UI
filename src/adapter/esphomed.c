@@ -10,6 +10,7 @@
 #include "mdns_client.h"
 #include "voice_ns.h"
 #include "adapter.h"
+#include "../intercom_protocol.h"
 #include "../config_store.h"
 #include "../json.h"
 #include "../esphome_health.h"
@@ -179,7 +180,7 @@ static void status_write(void){char b[512],tmp[512];int connected=0,fd,n;for(uns
  if(n<0||(size_t)n>=sizeof b||snprintf(tmp,sizeof tmp,"%s.tmp",S.status_path)>=(int)sizeof tmp)return;
  fd=open(tmp,O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC|O_NOFOLLOW,0600);if(fd<0)return;if(write(fd,b,(size_t)n)==n){close(fd);if(rename(tmp,S.status_path))unlink(tmp);}else{close(fd);unlink(tmp);}
 }
-static int mic_muted(void){return S.local_mute_gate||S.muted||S.privacy!=0||!S.last_audio_status||S.now-S.last_audio_status>1500;}
+static int mic_muted(void){return le_ic_lease_active(LE_IC_LEASE,S.now)||S.local_mute_gate||S.muted||S.privacy!=0||!S.last_audio_status||S.now-S.last_audio_status>1500;}
 /* Turn indicators use ledd's owner-scoped pattern layer, never "animate":
  * animate persists the theme as the ring's saved colour and breathes until
  * another command replaces it, and nothing ever ended it -- a failed turn left
@@ -335,9 +336,11 @@ static void turn_clear(const char *result,int notify){int active=S.turn||S.playi
  /* One voice event per opened turn (wake, announcement or continued turn). */
  if(S.voice_open){S.voice_open=0;event_send(ACTIVITY_VOICE_KEY,strcmp(result,"success")?"stopped":"finished");}/* Error flash only for a turn that was really interrupted: an idle HA
  * reconnect is not a user-visible failure. */
- profile(active&&!server&&strcmp(result,"success")&&strcmp(result,"cancelled")?"error":"idle");status_write();all_states();}
+ profile(active&&!server&&strcmp(result,"success")&&strcmp(result,"cancelled")&&strcmp(result,"intercom")?"error":"idle");status_write();all_states();}
 static int voice_start(uint64_t sample,int continued);
 static void cancel_turn(const char *reason){if(S.turn&&S.owner>=0){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,1,0);(void)send_writer(&S.clients[S.owner],90,&w);}turn_clear(reason,S.announcement);}
+/* Both markers expire: a companion crash cannot permanently disable Assist. */
+static void intercom_tick(void){static uint64_t refreshed;int hold=le_ic_lease_active(LE_IC_LEASE,S.now);if(hold){if(S.turn)cancel_turn("intercom");if(S.now-refreshed>=250){refreshed=S.now;(void)le_ic_lease_write(LE_IC_ACK,S.now);}}else if(refreshed){refreshed=0;unlink(LE_IC_ACK);}}
 /* A request the user cancelled (#404) ends quietly: ring straight to idle, no
  * error flash, and the HA pipeline is told to stop so no reply follows. The
  * ESPHome voice events carry no run id, so a brief guard keeps a fresh wake
@@ -422,6 +425,7 @@ static int svc_effect(const char *s){for(unsigned i=0;i<NELEM(led_effects);i++)i
 static int service_execute(const void *p,size_t n){struct svc_value v[3];unsigned count=0;unsigned key=(unsigned)ep_get_uint(p,n,1,0);
  char text[SERVICE_TEXT_MAX+1],escaped[2*SERVICE_TEXT_MAX+16],args[512];
  if(service_call(p,n,v,NELEM(v),&count))return -1;
+ if(le_ic_lease_active(LE_IC_LEASE,S.now))return 0;
  if(key==SERVICE_ANNOUNCE_KEY){if(count!=1||svc_text(&v[0],text,sizeof text)||!svc_plain_text(text))return -1;
   if(S.turn||S.playing)return 0;json_escape(escaped,sizeof escaped,text);snprintf(args,sizeof args,"{\"text\":\"%s\"}",escaped);return job(S.audio_path,"speak",args,0,0)?-1:0;}
  if(key==SERVICE_PLAY_SOUND_KEY){char name[SERVICE_NAME_MAX+2];if(count!=1||svc_text(&v[0],name,sizeof name)||!svc_sound_name(name))return -1;
@@ -568,7 +572,7 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  case 91:if(S.owner!=(int)idx||S.turn!=1)return 0;if(ep_get_uint(p,n,2,0)||ep_get_uint(p,n,1,0)){cancel_turn("ha_rejected");return 0;}S.turn=2;if(S.server_turn)status_write();return 0;
  case 92:if(S.owner==(int)idx)voice_event(p,n);return 0;
  case 119:if(S.owner!=(int)idx)return -1;if(S.turn){(void)announce_done(0);return 0;}
- if(dnd_on()){(void)announce_done(1);return 0;}
+ if(dnd_on()||le_ic_lease_active(LE_IC_LEASE,S.now)){(void)announce_done(1);return 0;}
  if(ep_get_text(p,n,1,url,sizeof url)||ep_get_text(p,n,3,S.next_url,sizeof S.next_url))return -1;S.turn=3;S.announcement=1;S.voice_open=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=!!ep_get_uint(p,n,4,0);snprintf(S.tts_url,sizeof S.tts_url,"%s",url);
  /* Field 3 is HA's preannounce chime (an ffmpeg_proxy WAV), field 1 the announcement: the chime plays first while
   * next_url holds the announcement. A chime that cannot play is skipped, never the announcement. */
@@ -746,6 +750,7 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  while(running){struct pollfd fds[2+CLIENTS];fds[0]=(struct pollfd){listener,POLLIN,0};for(unsigned i=0;i<CLIENTS;i++)fds[i+1]=(struct pollfd){S.clients[i].fd,(short)(POLLIN|(S.clients[i].tx_n?POLLOUT:0)),0};fds[1+CLIENTS]=(struct pollfd){S.button_fd,POLLIN,0};int ready=poll(fds,2+CLIENTS,10);S.now=now_ms();if(ready<0&&errno!=EINTR)break;
  if(reload_config){reload_config=0;for(unsigned i=0;i<CLIENTS;i++)client_close(i);if(load_configuration())break;}
  if(fds[0].revents&POLLIN){for(unsigned n=0;n<4;n++){int fd=accept(listener,NULL,NULL);if(fd<0)break;int flags=fcntl(fd,F_GETFL,0);if(flags<0||fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0){close(fd);continue;}unsigned idx;for(idx=0;idx<CLIENTS;idx++)if(S.clients[idx].fd<0)break;if(idx==CLIENTS){close(fd);continue;}struct client *c=&S.clients[idx];memset(c,0,sizeof *c);c->fd=fd;c->mode=-1;c->deadline=S.now+15000;c->last_seen=S.now;en_init(&c->noise);}}
+ intercom_tick();
  for(unsigned i=0;i<CLIENTS;i++)client_tick(i,fds[i+1].revents);
  if(S.button_fd>=0&&(fds[1+CLIENTS].revents&POLLIN))button_tick();
  if(S.now>=S.settings_poll+SETTINGS_POLL_MS){S.settings_poll=S.now;(void)job(S.led_path,"status","{}",10,0);(void)job(S.wake_path,"status","{}",11,0);(void)job(S.agent_path,"voice_history_generation","{}",HISTORY_GENERATION_KIND,0);}

@@ -12,6 +12,7 @@ cleanup(){
     rm -rf "$SUITE_TMP"
 }
 trap cleanup EXIT INT TERM
+sh tests/test_intercom.sh
 PORT=${LIBREECHO_TEST_PORT:-18082}
 URL="http://127.0.0.1:$PORT"
 CFG=./build/test-suite-config.json

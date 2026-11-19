@@ -59,6 +59,213 @@
   }
  ],
  "paths": {
+"/intercom": {
+    "get": {
+      "security": [
+        {
+          "BearerAuth": []
+        }
+      ],
+      "tags": [
+        "Intercom"
+      ],
+      "responses": {
+        "200": {
+          "$ref": "#/components/responses/Success"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      },
+      "summary": "Read device-local intercom permission and busy state",
+      "description": "Requires an actual local-account session over HTTPS. See docs/INTERCOM_PROTOCOL.md. Development/static-token-only access cannot authorize calls."
+    },
+    "put": {
+      "security": [
+        {
+          "BearerAuth": []
+        }
+      ],
+      "tags": [
+        "Intercom"
+      ],
+      "responses": {
+        "200": {
+          "$ref": "#/components/responses/Success"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      },
+      "summary": "Explicitly enable or revoke speaker calling",
+      "description": "Requires an actual local-account session over HTTPS. See docs/INTERCOM_PROTOCOL.md. Development/static-token-only access cannot authorize calls.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        },
+        {
+          "in": "header",
+          "name": "Origin",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Exact https:// plus this request Host; no generic insecure-LAN exception."
+        }
+      ],
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "enabled"
+              ],
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "/intercom/call": {
+    "post": {
+      "security": [
+        {
+          "BearerAuth": []
+        }
+      ],
+      "tags": [
+        "Intercom"
+      ],
+      "responses": {
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        },
+        "201": {
+          "description": "Envelope data contains ticket, id, expires_in_ms:30000 and fixed stream path. Neither ticket nor id belongs in a URL."
+        }
+      },
+      "summary": "Reserve one foreground LAN call and receive a one-use WSS ticket",
+      "description": "Requires an actual local-account session over HTTPS. See docs/INTERCOM_PROTOCOL.md. Development/static-token-only access cannot authorize calls.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        },
+        {
+          "in": "header",
+          "name": "Origin",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Exact https:// plus this request Host; no generic insecure-LAN exception."
+        }
+      ]
+    },
+    "delete": {
+      "security": [
+        {
+          "BearerAuth": []
+        }
+      ],
+      "tags": [
+        "Intercom"
+      ],
+      "responses": {
+        "200": {
+          "$ref": "#/components/responses/Success"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      },
+      "summary": "End only the call owned by this login and cancellation id",
+      "description": "Requires an actual local-account session over HTTPS. See docs/INTERCOM_PROTOCOL.md. Development/static-token-only access cannot authorize calls.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        },
+        {
+          "in": "header",
+          "name": "Origin",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Exact https:// plus this request Host; no generic insecure-LAN exception."
+        }
+      ],
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "/intercom/stream": {
+    "get": {
+      "tags": [
+        "Intercom"
+      ],
+      "summary": "Upgrade an HTTPS call to the bounded WSS PCM stream",
+      "description": "Exact Origin and current call reservation required. First masked text frame must authenticate the one-use ticket in five seconds. Wait for ready; binary messages then contain a 32-bit big-endian sequence plus 640 bytes of mono 16kHz S16LE PCM. No query credentials, fragments or extensions. See docs/INTERCOM_PROTOCOL.md.",
+      "responses": {
+        "101": {
+          "description": "WebSocket upgrade; microphone is still gated until first-frame authentication and native ready."
+        },
+        "403": {
+          "description": "Call connection refused before upgrade."
+        }
+      }
+    }
+  },
+
   "/": {
    "get": {
     "tags": [

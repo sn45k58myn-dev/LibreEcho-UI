@@ -32,7 +32,7 @@ else:
 flags=[os.environ.get('CC','cc'),'-std=c99','-D_POSIX_C_SOURCE=200809L','-O1','-g','-Wall','-Wextra','-Werror','-Wno-misleading-indentation','-I'+str(M/'include')]
 if a.sanitize:flags+=['-fsanitize=address,undefined','-fno-omit-frame-pointer']
 libs=[str(M/'lib'/('lib'+name+'.a')) for name in ['mbedtls','mbedx509','mbedcrypto']]+['-lm']
-common=['src/adapter/esphome_proto.c','src/adapter/esphome_ble_proxy.c','src/adapter/esphome_frame.c','src/adapter/esphome_noise.c','src/adapter/esphome_playback.c','src/adapter/radio_resample.c','src/adapter/mdns_client.c','src/adapter/mdns_lease.c','src/adapter/voice_ns.c','src/config_store.c','src/json.c']
+common=['src/intercom_protocol.c','src/adapter/esphome_proto.c','src/adapter/esphome_ble_proxy.c','src/adapter/esphome_frame.c','src/adapter/esphome_noise.c','src/adapter/esphome_playback.c','src/adapter/radio_resample.c','src/adapter/mdns_client.c','src/adapter/mdns_lease.c','src/adapter/voice_ns.c','src/config_store.c','src/json.c']
 def run(argv,env=None):
  print('+',' '.join(map(str,argv)),flush=True);subprocess.run(list(map(str,argv)),cwd=ROOT,env=env,check=True,timeout=90)
 with tempfile.TemporaryDirectory(prefix='esphomed-suite-',dir=scratch) as directory:
@@ -47,6 +47,7 @@ with tempfile.TemporaryDirectory(prefix='esphomed-suite-',dir=scratch) as direct
   'timer-lifecycle':['tests/test_esphomed_timer_lifecycle.c']+common,
   'idle':['tests/test_esphomed_idle.c']+common,
   'chimes':['tests/test_esphomed_chimes.c']+common,
+  'intercom':['tests/test_esphomed_intercom.c']+common,
  }
  for name,sources in cases.items():
   binary=d/name;run(flags+sources+libs+['-o',binary])
@@ -56,7 +57,7 @@ with tempfile.TemporaryDirectory(prefix='esphomed-suite-',dir=scratch) as direct
   elif name=='idle':
    for case in ['quiet-owner-pinged','silent-owner-dropped','idle-disconnect-no-error-flash','active-turn-disconnect-flashes']:
     with tempfile.TemporaryDirectory(prefix='idle-',dir=d) as private:run([binary,case,private],env)
-  elif name=='chimes':
+  elif name in ('chimes','intercom'):
    with tempfile.TemporaryDirectory(prefix='chimes-',dir=d) as private:run([binary,private],env)
   else:run([binary],env)
  run([sys.executable,'tests/test_esphome_ffmpeg_wav.py','--http-fixture',d/'http'],env)

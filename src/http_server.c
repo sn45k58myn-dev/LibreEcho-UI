@@ -1,4 +1,5 @@
 #include "http_server.h"
+#include "intercom.h"
 #include "config_store.h"
 #include "sound_store.h"
 #include "json.h"
@@ -248,6 +249,16 @@ static void finish_client_response(struct client*c,size_t headers,size_t content
     }
     close(c->fd);client_clear(c);
 }
+/* Intercom does not accept ambiguous duplicate credential/upgrade headers. */
+static int intercom_headers_unique(const char *request){
+ const char *names[]={"Host","Origin","Sec-WebSocket-Key","Sec-WebSocket-Version","Upgrade","Connection"};
+ for(size_t i=0;i<sizeof(names)/sizeof(names[0]);i++){
+  const char *p=strstr(request,"\r\n");unsigned count=0;size_t n=strlen(names[i]);
+  while(p&&p[2]&&p[2]!='\r'){p+=2;if(!strncasecmp(p,names[i],n)&&p[n]==':')count++;p=strstr(p,"\r\n");}
+  if(count!=1)return 0;
+ }
+ return 1;
+}
 static void process(struct client*c,const struct http_options*o,struct api_context*api,int http_listener,int https_listener,int relay_listener,const struct client*clients,int max){char*end=strstr(c->buf,"\r\n\r\n"),*body,*cl,*target_start,*target_end;
 size_t headers,body_len=0,content_len=0;
 const char *page_path;
@@ -276,6 +287,20 @@ if(!strncmp(q.path,"/api/v1/sounds/",15)&&!strcmp(q.method,"PUT")){size_t initia
 if(content_len>LE_BODY_MAX){response(c->fd,413,"application/json","{\"ok\":false,\"data\":null,\"error\":{\"code\":\"body_too_large\",\"message\":\"Request body exceeds 16 KiB\"}}",sizeof("{\"ok\":false,\"data\":null,\"error\":{\"code\":\"body_too_large\",\"message\":\"Request body exceeds 16 KiB\"}}")-1);
 goto done;
 }if(c->used<headers+content_len)return;
+if(!strcmp(q.path,"/api/v1/intercom/stream")){
+ char key[96],version[16],upgrade[32],connection[96];
+ q.https=c->secure_transport;
+ copy_header(q.host,sizeof(q.host),header(c->buf,"Host"));
+ copy_header(q.origin,sizeof(q.origin),header(c->buf,"Origin"));
+ copy_header(key,sizeof(key),header(c->buf,"Sec-WebSocket-Key"));
+ copy_header(version,sizeof(version),header(c->buf,"Sec-WebSocket-Version"));
+ copy_header(upgrade,sizeof(upgrade),header(c->buf,"Upgrade"));
+ copy_header(connection,sizeof(connection),header(c->buf,"Connection"));
+ if(content_len||c->used!=headers||!intercom_headers_unique(c->buf)||le_ic_upgrade(api,&q,c->fd,key,version,upgrade,connection)){
+  response(c->fd,403,"text/plain","Call connection refused",23);goto done;
+ }
+ client_clear(c);return;
+}
 body=end+4;
 body_len=content_len;
 q.body=body;
@@ -401,12 +426,12 @@ if(le_tls_write_deadline(tls,buf,(size_t)n,LE_TLS_IDLE_TIMEOUT_MS)!=n)break;
 close(up);le_tls_close(tls);close(cfd);return;}
 
 /* Keep TLS relays in the same fixed process budget as other forked work. */
-static int spawn_tls_relay(int cfd,const struct http_options*o,int relay_port,int http_listener,int https_listener,int relay_listener,const struct client*clients,int max){sigset_t previous;pid_t pid;int i,slot;if(child_worker_begin(CHILD_WORKER_TLS_RELAY,&previous,&slot))return-1;pid=fork();if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);close(http_listener);close(https_listener);close(relay_listener);for(i=0;i<max;i++)if(clients[i].fd>=0)close(clients[i].fd);tls_relay(cfd,o,relay_port);_exit(0);}child_worker_register(slot,pid,CHILD_WORKER_TLS_RELAY);sigprocmask(SIG_SETMASK,&previous,NULL);return 0;}
+static int spawn_tls_relay(int cfd,const struct http_options*o,int relay_port,int http_listener,int https_listener,int relay_listener,const struct client*clients,int max){sigset_t previous;pid_t pid;int i,slot;if(child_worker_begin(CHILD_WORKER_TLS_RELAY,&previous,&slot))return-1;pid=fork();if(pid<0){sigprocmask(SIG_SETMASK,&previous,NULL);return-1;}if(pid==0){sigprocmask(SIG_SETMASK,&previous,NULL);le_ic_close();close(http_listener);close(https_listener);close(relay_listener);for(i=0;i<max;i++)if(clients[i].fd>=0)close(clients[i].fd);tls_relay(cfd,o,relay_port);_exit(0);}child_worker_register(slot,pid,CHILD_WORKER_TLS_RELAY);sigprocmask(SIG_SETMASK,&previous,NULL);return 0;}
 
 int http_server_run(const struct http_options*o,struct api_context*api,volatile int*running){int ls,tls_ls=-1,relay_ls=-1,relay_port=0,i,yes=1,max=o->max_clients<1?LE_MAX_CLIENTS:o->max_clients;struct sigaction child_action;
 struct sockaddr_in a;
 struct client c[LE_MAX_CLIENTS];
-struct pollfd p[LE_MAX_CLIENTS+3];
+struct pollfd p[LE_MAX_CLIENTS+5];
 time_t last_tick=0;memset(&child_action,0,sizeof(child_action));child_action.sa_handler=reap_child_workers;sigemptyset(&child_action.sa_mask);child_action.sa_flags=SA_RESTART;if(sigaction(SIGCHLD,&child_action,NULL)<0)return-1;
 if(max>LE_MAX_CLIENTS)max=LE_MAX_CLIENTS;
 memset(c,0,sizeof(c));
@@ -456,13 +481,14 @@ for(i=0;
 i<max;
 i++){p[i+1].fd=c[i].fd;
 p[i+1].events=POLLIN;
-}ready=poll(p,(nfds_t)(max+3),le_feature_provenance_busy()?0:500);if(ready<0&&errno!=EINTR)break;
+}le_ic_pollfds(p+max+3);ready=poll(p,(nfds_t)(max+5),le_feature_provenance_busy()?0:50);if(ready<0&&errno!=EINTR)break;
 if(clock_gettime(CLOCK_MONOTONIC,&now)<0)break;
 now_ms=(unsigned long long)now.tv_sec*1000+(unsigned long long)now.tv_nsec/1000000;
 /* Incomplete requests and rejected bodies remain in these slots. Expire before
    accepting so idle clients cannot prevent the next connection from working. */
 for(i=0;i<max;i++)if(c[i].fd>=0&&now_ms-c[i].started_ms>=(c[i].drain_remaining?LE_REJECT_DRAIN_TIMEOUT_MS:LE_REQUEST_TIMEOUT_MS)){close(c[i].fd);client_clear(&c[i]);p[i+1].revents=0;}
 if(ready<0)continue;
+le_ic_tick(api,p+max+3);
 if(p[0].revents&POLLIN){int fd=accept(ls,0,0);
 if(fd>=0&&close_on_exec(fd)<0){close(fd);fd=-1;}
 if(fd>=0){for(i=0;
@@ -501,6 +527,7 @@ le_authority_provenance_tick();
 }for(i=0;
 i<max;
 i++)if(c[i].fd>=0){close(c[i].fd);client_clear(&c[i]);}
+le_ic_close();
 if(tls_ls>=0)close(tls_ls);
 if(relay_ls>=0)close(relay_ls);
 close(ls);

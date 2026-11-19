@@ -347,3 +347,10 @@ Public image builds must use a credential-free Wi-Fi profile and receive user-sp
 - [`LICENSE`](LICENSE) — source license
 
 Hardware acceptance, image provenance, OTA publication, flashing, slot confirmation, and rollback evidence belong in the product/build repositories and their release records, not in this UI source README.
+
+## Foreground phone intercom candidate
+
+The [phone and room intercom guide](docs/INTERCOM.md) describes the default-off,
+authenticated HTTPS two-way calling candidate, its native audio ownership and
+required iPhone/device qualification. It is LAN-first and requires Home
+Assistant voice mode; existing ESPHome boards do not automatically support it.
