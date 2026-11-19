@@ -10,3 +10,6 @@ ${CC:-cc} -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -I
 make build/libreecho-intercomd
 python3 tests/test_intercom_native.py
 node tests/test_intercom_browser.js
+if [ "${LIBREECHO_INTERCOM_HTTPS_TEST:-0}" = 1 ]; then
+    python3 tests/test_intercom_https.py
+fi

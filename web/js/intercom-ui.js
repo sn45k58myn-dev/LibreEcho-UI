@@ -80,7 +80,11 @@ async function startIntercom(){
   }catch(e){if(intercomCall===call)stopIntercom(e.message||'The call could not start.');}
 }
 async function intercomPage(){
+  if(state.page!=='Intercom')return;
+  const generation=state.renderGeneration;
+  if(intercomCall)stopIntercom('Call ended while this page refreshed.');
   const config=await api('/intercom');
+  if(state.page!=='Intercom'||generation!==state.renderGeneration)return;
   content.innerHTML='<section class="panel"><h2>Call this room</h2><p>Talk both ways between this phone and the room. Keep this page open in the foreground on your home network.</p><p>Calling is off until you allow it on this speaker. Every signed-in local account can use that permission. The room sounds a cue and flashes its ring during a call. Its microphone mute, privacy switch and Do Not Disturb end the call.</p><label><input id="intercom-permission" type="checkbox" '+(config.enabled?'checked':'')+'> Allow calls to this speaker</label><p>Requires trusted HTTPS and Home Assistant voice mode. Bypassing a self-signed certificate warning does not establish microphone access in Safari. Other voice boards need an intercom endpoint; an existing ESPHome speaker alone does not provide one.</p><p id="intercom-status" role="status" aria-live="polite">'+(config.busy?'This speaker already has a call.':'Ready when you are.')+'</p><div class="actions"><button id="intercom-start" type="button" '+(!config.enabled||config.busy?'disabled':'')+'>Call room</button> <button id="intercom-mute" type="button" disabled>Mute my microphone</button> <button id="intercom-end" type="button" disabled>End call</button></div></section>';
   document.getElementById('intercom-start').onclick=startIntercom;
   document.getElementById('intercom-end').onclick=()=>stopIntercom();
