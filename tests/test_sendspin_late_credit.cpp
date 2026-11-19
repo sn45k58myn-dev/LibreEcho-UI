@@ -47,7 +47,27 @@ static void cached_progress_survives_writer() {
     CHECK(sink.progress(&timing,5)==SinkResult::Ok,"late PROGRESS retained by writer is returned without another request");
     sink.disconnect();server.stop();
 }
+// A slow engine may outlive several main-loop deadlines. Retrying the one
+// outstanding request must not queue a new PROGRESS reply on every call.
+static void timed_out_progress_is_one_inflight_request() {
+    EngineServer server; const auto path=unique_socket_path("latep");
+    CHECK(server.start(path),"progress retry sink");
+    EngineSink sink;
+    CHECK(sink.connect(path,1000)==SinkResult::Ok && sink.open(1,1000)==SinkResult::Ok,
+          "progress retry OPEN");
+    EngineSinkTiming timing{};
+    server.pause();
+    for(int i=0;i<12;++i)
+        CHECK(sink.progress(&timing,5)==SinkResult::Timeout,"progress retry stays bounded");
+    server.resume();
+    CHECK(sink.progress(&timing,1000)==SinkResult::Ok,"adopt the original delayed progress");
+    server.pause();
+    CHECK(sink.progress(&timing,5)==SinkResult::Timeout,
+          "one reply exhausted the old request; no duplicate replies remain queued");
+    sink.disconnect();server.stop();
+}
 int main(){scenario(false,false);scenario(true,false);scenario(true,true);cached_progress_survives_writer();
+    timed_out_progress_is_one_inflight_request();
     if(g_failures) return 1;
     std::puts("test_sendspin_late_credit: all checks passed");return 0;
 }

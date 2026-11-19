@@ -218,6 +218,11 @@ size_t EngineSinkSession::write(const uint8_t* pcm, size_t length,
 
 SinkResult EngineSinkSession::poll(EngineSinkTiming* out) {
     std::lock_guard<std::mutex> guard(mu_);
+    // The predecessor is no longer live. In particular, a successor OPEN may
+    // still be awaiting its ACK after one bounded re-arm attempt timed out.
+    // Polling the old generation would consume that reply in progress(), which
+    // cannot adopt it, and leave the OPEN retry waiting for an ACK already lost.
+    if (state_ == SessionState::Lost) return SinkResult::NotOpen;
     const uint32_t timeout = clamp(config_.control_timeout_ms,
                                    kSessionMaxOpTimeoutMs);
     const SinkResult r = sink_.progress(out, timeout);

@@ -70,6 +70,7 @@ void EngineSink::close_socket_locked() {
     pending_ready_ = false;
     cached_progress_us_ = 0;
     inflight_open_generation_ = 0;
+    inflight_progress_ = false;
     inflight_finish_ = false;
 }
 
@@ -77,6 +78,7 @@ void EngineSink::fence_locked() {
     // An abandoned OPEN may still be acknowledged later; a fresh OPEN of the
     // same generation then draws STALE_GENERATION and the session advances.
     inflight_open_generation_ = 0;
+    inflight_progress_ = false;
     inflight_finish_ = false;
     armed_ = false;
     pending_frames_ = 0;
@@ -210,6 +212,19 @@ SinkResult EngineSink::recv_datagram(uint8_t* type, const uint8_t** payload,
         if (le_audio_sink_decode_header(rx_, static_cast<size_t>(n), &header) !=
             LE_AUDIO_SINK_OK)
             return SinkResult::Malformed;
+        // A late progress response can be consumed by a DATA/control wait.
+        // Retire the one outstanding request there too, before caching or
+        // skipping its reply, so the next progress call can request fresh data.
+        const uint8_t* reply = rx_ + LE_AUDIO_SINK_HEADER_BYTES;
+        if (inflight_progress_ &&
+            ((header.type == LE_AUDIO_SINK_TYPE_PROGRESS &&
+              header.length == LE_AUDIO_SINK_PROGRESS_PAYLOAD_BYTES &&
+              le_audio_sink_get_u32(reply) == epoch_ &&
+              le_audio_sink_get_u32(reply + 4) == generation_) ||
+             (header.type == LE_AUDIO_SINK_TYPE_ERROR &&
+              header.length == LE_AUDIO_SINK_ERROR_PAYLOAD_BYTES &&
+              le_audio_sink_get_u32(reply + 12) == LE_AUDIO_SINK_TYPE_PROGRESS_REQ)))
+            inflight_progress_ = false;
         if (type) *type = header.type;
         if (length) *length = header.length;
         if (payload) *payload = rx_ + LE_AUDIO_SINK_HEADER_BYTES;
@@ -362,12 +377,38 @@ SinkResult EngineSink::open(uint32_t generation, uint32_t timeout_ms) {
             return r;
         }
         if (type == LE_AUDIO_SINK_TYPE_ERROR) {
+            // Replies to predecessor operations can precede this OPEN_ACK.
+            // ERROR names the engine's current generation, so generation alone
+            // cannot distinguish an old PROGRESS/DATA refusal from this OPEN.
+            // Only a canonical, known different opcode is safely unrelated.
+            if (len == LE_AUDIO_SINK_ERROR_PAYLOAD_BYTES &&
+                le_audio_sink_get_u32(pl) >= LE_AUDIO_SINK_ERR_MAGIC &&
+                le_audio_sink_get_u32(pl) <= LE_AUDIO_SINK_ERR_PEER &&
+                le_audio_sink_get_u32(pl + 16) == 0 &&
+                le_audio_sink_get_u32(pl + 12) >= LE_AUDIO_SINK_TYPE_DATA &&
+                le_audio_sink_get_u32(pl + 12) <= LE_AUDIO_SINK_TYPE_RESET)
+                continue;
             inflight_open_generation_ = 0;
             if (len >= 4) last_error_ = le_audio_sink_get_u32(pl);
             last_result_ = SinkResult::Rejected;
             return last_result_;
         }
-        if (type != LE_AUDIO_SINK_TYPE_OPEN_ACK) continue;
+        if (type != LE_AUDIO_SINK_TYPE_OPEN_ACK) {
+            uint32_t expected = 0;
+            switch (type) {
+                case LE_AUDIO_SINK_TYPE_CREDIT: expected = LE_AUDIO_SINK_CREDIT_PAYLOAD_BYTES; break;
+                case LE_AUDIO_SINK_TYPE_PROGRESS: expected = LE_AUDIO_SINK_PROGRESS_PAYLOAD_BYTES; break;
+                case LE_AUDIO_SINK_TYPE_FINISH_ACK: expected = LE_AUDIO_SINK_FINISH_ACK_PAYLOAD_BYTES; break;
+                case LE_AUDIO_SINK_TYPE_RESET_ACK: expected = LE_AUDIO_SINK_RESET_ACK_PAYLOAD_BYTES; break;
+                default: break;
+            }
+            if (expected == 0 || len != expected || le_audio_sink_get_u32(pl + len - 4) != 0) {
+                inflight_open_generation_ = 0;
+                last_result_ = SinkResult::Malformed;
+                return last_result_;
+            }
+            continue;
+        }
         // A late ACK for an OPEN abandoned before this generation is stale.
         if (len == LE_AUDIO_SINK_OPEN_ACK_PAYLOAD_BYTES &&
             le_audio_sink_get_u32(pl + 8) < generation)
@@ -405,6 +446,7 @@ SinkResult EngineSink::open(uint32_t generation, uint32_t timeout_ms) {
         pending_frames_ = 0;
         pending_ready_ = false;
         cached_progress_us_ = 0;
+        inflight_progress_ = false;
         capacity_bound_ = 0;
         capacity_bound_known_ = false;  // a new generation starts empty
         last_write_full_ = false;
@@ -416,7 +458,10 @@ SinkResult EngineSink::open(uint32_t generation, uint32_t timeout_ms) {
         last_result_ = SinkResult::Ok;
         return SinkResult::Ok;
     }
-    last_result_ = SinkResult::Malformed;
+    // The bounded drain consumed only framed replies to older operations. Keep
+    // this OPEN in flight and resume its reply on the next bounded call rather
+    // than spending the re-arm refusal budget on valid queued traffic.
+    last_result_ = SinkResult::Timeout;
     return last_result_;
 }
 
@@ -812,11 +857,15 @@ SinkResult EngineSink::progress(EngineSinkTiming* out, uint32_t timeout_ms) {
     le_audio_sink_put_u32(payload + 4, generation_);
 
     const int64_t deadline = now_us() + static_cast<int64_t>(timeout_ms) * 1000;
-    SinkResult r = send_datagram(LE_AUDIO_SINK_TYPE_PROGRESS_REQ, payload,
-                                 sizeof(payload), deadline);
-    if (r != SinkResult::Ok) {
-        last_result_ = r;
-        return r;
+    SinkResult r = SinkResult::Ok;
+    if (!inflight_progress_) {
+        r = send_datagram(LE_AUDIO_SINK_TYPE_PROGRESS_REQ, payload,
+                          sizeof(payload), deadline);
+        if (r != SinkResult::Ok) {
+            last_result_ = r;
+            return r;
+        }
+        inflight_progress_ = true;
     }
 
     for (int guard = 0; guard < 8; ++guard) {

@@ -136,7 +136,8 @@ public:
     // client is disarmed until a strictly higher generation is OPENed.
     SinkResult cancel(uint32_t timeout_ms);
 
-    // Query engine progress for the live generation into `out`.
+    // Query engine progress for the live generation into `out`. A request that
+    // times out stays in flight; the next call resumes it without retransmission.
     SinkResult progress(EngineSinkTiming* out, uint32_t timeout_ms);
 
     uint32_t epoch() const;
@@ -200,6 +201,7 @@ private:
     // identity waits for the original reply instead of issuing a duplicate
     // the engine would reject as stale. Cleared by any reply or socket loss.
     uint32_t inflight_open_generation_ = 0;
+    bool inflight_progress_ = false;
     bool inflight_finish_ = false;
     uint64_t inflight_finish_total_ = 0;
 
