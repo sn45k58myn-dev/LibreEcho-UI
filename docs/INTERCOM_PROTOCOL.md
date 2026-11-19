@@ -89,3 +89,9 @@ Test overrides select private Unix/FIFO/config/privacy/lease paths. Production
 startup uses fixed local defaults. Extending this interface to another board
 requires equivalent physical privacy and output ownership guarantees; the
 local socket must not be exposed on the network as a shortcut around WSS auth.
+
+The HA-owned watchdog probes the companion PID file, because the audio-only
+seqpacket endpoint has no JSON status command. Its existing host-fixture
+`--service` syntax accepts `NAME:pidfile=PATH:INIT::home-assistant` for an
+explicit PID probe. This permits real companion recovery tests without opening
+physical devices or making a health probe compete with a call.

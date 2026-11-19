@@ -402,6 +402,9 @@ static int setup_activate_installed_features(struct api_context *c)
 #ifndef LE_INIT_ESPHOMED
 #define LE_INIT_ESPHOMED  "/etc/init.d/libreecho-esphomed.init"
 #endif
+#ifndef LE_INIT_INTERCOMD
+#define LE_INIT_INTERCOMD "/etc/init.d/libreecho-intercomd.init"
+#endif
 #ifndef LE_INIT_MDNSD
 #define LE_INIT_MDNSD     "/etc/init.d/libreecho-mdnsd.init"
 #endif
@@ -595,6 +598,12 @@ static int voice_pipeline_restart(const char *mode)
     int failed = 0, satellite_stop_failed = 0;
     const int ha = !strcmp(mode, "home-assistant");
 
+    /* A call must end before either voice owner is restarted. Missing means
+       the optional intercom feature is not installed. */
+    if (access(LE_INIT_INTERCOMD, X_OK) == 0 &&
+        run_init_command(LE_INIT_INTERCOMD, "stop"))
+        failed = satellite_stop_failed = 1;
+
     if (access(LE_INIT_AGENTD,X_OK)==0 && run_init_command(LE_INIT_AGENTD, "stop"))
         failed = 1;
     if (access(LE_INIT_STTD,X_OK)==0 && run_init_command(LE_INIT_STTD, "stop"))
@@ -621,6 +630,10 @@ static int voice_pipeline_restart(const char *mode)
             (void)run_init_command(LE_INIT_TTSD, "start");
         for(tick=0;tick<50;tick++){
             if(esphome_satellite_ready()){
+                /* Calling is optional; failure here must not disable Assist.
+                   The HA-owned watchdog restores a previously running peer. */
+                if (access(LE_INIT_INTERCOMD, X_OK) == 0)
+                    (void)run_init_command(LE_INIT_INTERCOMD, "start");
                 (void)refresh_home_assistant_discovery();return LE_OK;
             }
             {struct timespec delay={0,100000000L};nanosleep(&delay,NULL);}

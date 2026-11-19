@@ -424,7 +424,7 @@ $(BUILD)/test-esphome-remote-timer: tests/test_esphome_remote_timer.c src/adapte
 		src/adapter/timer_schedule.c src/adapter/adapter_server.c src/json.c src/log.c -o $@
 
 $(BUILD)/libreecho-intercomd: $(INTERCOMD_OBJECTS)
-	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(INTERCOMD_OBJECTS) -o $@ -lm
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(INTERCOMD_OBJECTS) $(LDFLAGS) -o $@ -lm
 
 $(BUILD)/libreecho-lived: $(LIVED_OBJECTS) $(TLS_SOURCES:src/%.c=$(BUILD)/%.o)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(LIVED_OBJECTS) \
@@ -1233,6 +1233,13 @@ $(BUILD)/test-voice-whisper: tests/test_voice_whisper.c \
 		-Wpedantic -Werror -Isrc tests/test_voice_whisper.c \
 		src/adapter/voice_whisper.c -o $@
 
+$(BUILD)/test-intercom-mode-exit: tests/test_intercom_mode_exit.c \
+	src/api.c src/wake_model.c src/wake_model_store.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c src/adapter/timer_schedule.c src/adapter/voice_clip_store.c
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c src/adapter/voice_clip_store.c -o $@
+
 $(BUILD)/test-voice-pipeline-restart: tests/test_voice_pipeline_restart.c \
 	src/api.c src/wake_model.c src/wake_model_store.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c src/adapter/timer_schedule.c src/adapter/voice_clip_store.c
 	@mkdir -p $(BUILD)
@@ -1531,7 +1538,7 @@ clean:
 		$(BUILD)/test-voice-reply \
 		$(BUILD)/test-voice-playback \
 		$(BUILD)/test-voice-listening-feedback \
-		$(BUILD)/test-voice-pipeline-restart \
+		$(BUILD)/test-voice-pipeline-restart $(BUILD)/test-intercom-mode-exit \
 		$(BUILD)/test-voice-whisper \
 		$(BUILD)/test-service-env-isolation \
 		$(BUILD)/test-service-cancel-linux \

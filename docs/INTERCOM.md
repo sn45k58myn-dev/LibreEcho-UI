@@ -47,7 +47,10 @@ The web daemon owns authentication and the WSS connection. The small C99
 `libreecho-intercomd` companion owns the call's local audio subscriptions. It
 uses the existing waked post-AEC stream and audiod system PCM bus; micd and
 audiod remain the sole hardware PCM owners. Idle intercomd never subscribes to
-the microphone. It needs the existing audio, LED, wake and HA/esphomed runtime.
+the microphone. The HA-owned watchdog restores a crashed companion using its
+PID file; it never sends status probes to the single-call audio socket. Voice
+mode transitions stop the companion before changing owners and start it only
+after HA readiness. Calling permission stays off unless explicitly enabled. It needs the existing audio, LED, wake and HA/esphomed runtime.
 
 The source Makefile installs `libreecho-intercomd` and
 `libreecho-intercomd.init`. Platform image assembly must also include both in
