@@ -13,7 +13,7 @@ DAEMON=${DAEMON:-/usr/local/sbin/libreecho-intercomd}
 PIDFILE=${PIDFILE:-/var/run/libreecho-intercomd.pid}
 LOGFILE=${LOGFILE:-/var/log/libreecho-intercomd.log}
 SOCKET=${SOCKET:-/run/libreecho/intercom.sock}
-CONFIG=${CONFIG:-${LE_CONFIG_PATH:-/etc/libreecho/web-config.json}}
+CONFIG=${CONFIG:-${LE_CONFIG_PATH:-/data/libreecho/config/web-config.json}}
 ARGS=${ARGS:---socket $SOCKET --config $CONFIG}
 # Idle service has no microphone subscription. Speaker permission defaults off.
 

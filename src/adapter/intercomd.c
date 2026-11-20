@@ -19,7 +19,7 @@
 #include <unistd.h>
 
 static volatile sig_atomic_t running = 1;
-static const char *config = "/etc/libreecho/web-config.json";
+static const char *config = "/data/libreecho/config/web-config.json";
 static const char *privacy = "/sys/devices/platform/amz_privacy/privacy_state";
 static const char *audio = "/run/libreecho/audio.sock";
 static const char *wake = "/run/libreecho/wakeword.sock";

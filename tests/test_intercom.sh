@@ -10,6 +10,7 @@ ${CC:-cc} -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -I
 "$fixture/test" "$fixture"
 make build/libreecho-intercomd
 python3 tests/test_intercom_native.py
+python3 tests/test_intercom_config.py
 node tests/test_intercom_browser.js
 make build/libreecho-watchdogd build/test-intercom-mode-exit
 python3 tests/test_intercom_watchdog.py
