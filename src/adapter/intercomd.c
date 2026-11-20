@@ -27,9 +27,12 @@ static const char *led = "/run/libreecho/led.sock";
 static const char *bus = "/run/libreecho-audio/system.pcm";
 static const char *socket_path = LE_IC_SOCKET;
 static const char *lease = LE_IC_LEASE, *ack = LE_IC_ACK;
+/* The PCM engine may spend about 1.5 s preparing a cold output. */
+#define OUTPUT_STALL_LIMIT_MS 2500u
 static struct {
     int client, mic, output, stage;
     uint64_t started, checked, indicated, refreshed, last_input, mic_sample;
+    uint64_t output_blocked_since;
     unsigned char mic_rx[8192], packet[LE_IC_PCM_BYTES];
     size_t mic_n, packet_n, output_n;
     int16_t output_pcm[2048];
@@ -147,8 +150,9 @@ static int phone_read(uint64_t now)
         if (le_ic_lease_write(lease, now)) return -1;
         s.stage = 1; s.started = s.last_input = s.refreshed = now; return 0;
     }
-    if (s.stage != 3 || n != LE_IC_PCM_BYTES || s.output_n) return -1;
+    if (s.stage != 3 || n != LE_IC_PCM_BYTES) return -1;
     for (i = 0; i < LE_IC_SAMPLES; i++) pcm[i] = (int16_t)((unsigned)b[i * 2] | (unsigned)b[i * 2 + 1] << 8);
+    /* Keep only the newest unsent block while the system FIFO is full. */
     count = le_radio_resample(&s.resampler, pcm, LE_IC_SAMPLES, 1, 16000, s.output_pcm, 1024);
     if (count <= 0 || count > 1024) return -1;
     s.output_n = (size_t)count * 4u; s.last_input = now; return 0;
@@ -220,6 +224,10 @@ int main(int argc, char **argv)
             s.stage = 2;
         }
         if (!le_ic_lease_active(ack, now)) { end_call(); continue; }
+        if (s.output_blocked_since && now - s.output_blocked_since >= OUTPUT_STALL_LIMIT_MS) {
+            end_call();
+            continue;
+        }
         if (now - s.indicated >= 1000u) {
             s.indicated = now;
             if (indicator()) { end_call(); continue; }
@@ -227,8 +235,15 @@ int main(int argc, char **argv)
         if ((p[2].revents & POLLIN) && microphone_read()) { end_call(); continue; }
         if (s.output_n) {
             ssize_t written = write(s.output, s.output_pcm, s.output_n);
-            if (written == (ssize_t)s.output_n) s.output_n = 0;
-            else if (written >= 0 || (errno != EAGAIN && errno != EINTR)) { end_call(); continue; }
+            if (written == (ssize_t)s.output_n) {
+                s.output_n = 0;
+                s.output_blocked_since = 0;
+            } else if (written < 0 && (errno == EAGAIN || errno == EINTR)) {
+                if (!s.output_blocked_since) s.output_blocked_since = now;
+            } else {
+                end_call();
+                continue;
+            }
         }
     }
     end_call(); close(listener); unlink(socket_path); return 0;
