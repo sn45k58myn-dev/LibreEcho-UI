@@ -17,7 +17,7 @@ function render(processor,quanta,value=0){
     output=new Float32Array(128);
     processor.process([[new Float32Array(128).fill(value)]],[[output]]);
     assert.ok(processor.count>=0&&processor.count<=1920);assert.equal(processor.ring.length,4096);
-    assert.ok(processor.used>=0&&processor.used<320);assert.ok(processor.credit>=0&&processor.credit<=2);
+    assert.ok(processor.used>=0&&processor.used<=(processor.overrun?320:319));assert.ok(processor.credit>=0&&processor.credit<=2);
   }
   return output;
 }
@@ -43,10 +43,16 @@ assert.equal(captured.length,2); // A credit cannot flush any saved capture back
 render(delayed,83,.75);
 assert.equal(delayErrors,0);assert.equal(maximumOutstanding,2);assert.ok(captured.length>=12);
 assert.ok(captured.slice(3).every(value=>value===24575)); // Recovery delivers current audio, not the discarded gap.
-const blocked=new Processor();let blockedPackets=0,blockedErrors=0;
-blocked.port.postMessage=data=>{if(data.type==='pcm')blockedPackets++;if(data.type==='overrun')blockedErrors++;};
+for(let i=0;i<5;i++){
+  acknowledge=false;render(delayed,38);assert.equal(delayErrors,0);
+  acknowledge=true;while(outstanding){outstanding--;delayed.port.onmessage({data:{type:'credit'}});}render(delayed,8);
+}
+assert.equal(delayErrors,0);assert.equal(maximumOutstanding,2); // Separate brief gaps are not cumulative overload.
+const blocked=new Processor();let blockedPackets=0,blockedErrors=0,blockedReason;
+blocked.port.postMessage=data=>{if(data.type==='pcm')blockedPackets++;if(data.type==='overrun'){blockedErrors++;blockedReason=data.reason;}};
 blocked.port.onmessage({data:{type:'arm'}});render(blocked,750); // Two seconds is sustained, rather than a scheduling hiccup.
 assert.equal(blockedPackets,2);assert.equal(blockedErrors,1);assert.equal(blocked.armed,false);
+assert.equal(blockedReason,'capture-stalled');
 blocked.port.onmessage({data:{type:'credit'}});blocked.port.onmessage({data:{type:'arm'}});render(blocked,38);
 assert.equal(blockedPackets,2);assert.equal(blockedErrors,1); // Terminal overload cannot restart capture.
 
@@ -65,16 +71,18 @@ const expected=(2280+phase)/32768;
 assert.ok(Math.abs(render(receive,1)[0]-expected)<1e-7);assert.equal(receiveErrors,0);
 render(receive,100); // Normal playback drains the bounded burst and recovers.
 receivePacket(receive,10);assert.equal(receiveErrors,0);
-const flooded=new Processor();let floodErrors=0;
-flooded.port.postMessage=data=>{if(data.type==='overrun')floodErrors++;};
+const flooded=new Processor();let floodErrors=0,floodReason;
+flooded.port.postMessage=data=>{if(data.type==='overrun'){floodErrors++;floodReason=data.reason;}};
 for(let i=0;i<200;i++){receivePacket(flooded,i%30);render(flooded,1);}
 assert.equal(floodErrors,1);assert.equal(flooded.armed,false);
+assert.equal(floodReason,'playback-stalled');assert.ok(render(flooded,1).every(value=>value===0));
 const failedCount=flooded.count;
 receivePacket(flooded,0);assert.equal(flooded.count,failedCount);assert.equal(floodErrors,1);
-const malformed=new Processor();let malformedErrors=0;
-malformed.port.postMessage=data=>{if(data.type==='overrun')malformedErrors++;};
+const malformed=new Processor();let malformedErrors=0,malformedReason;
+malformed.port.postMessage=data=>{if(data.type==='overrun'){malformedErrors++;malformedReason=data.reason;}};
 malformed.port.onmessage({data:{type:'pcm',buffer:new Int16Array(319).buffer}});
 assert.equal(malformedErrors,1);assert.equal(malformed.count,0);
+assert.equal(malformedReason,'invalid-playback');
 
 (async()=>{
   const elements=new Map(),requests=[],listeners={};let grantResolve,pageResolve,captures=0,stopped=0,closed=0;
