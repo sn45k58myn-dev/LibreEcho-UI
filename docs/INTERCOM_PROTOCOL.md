@@ -58,7 +58,10 @@ to two maximum frames, transmit buffering to four maximum frames, and each
 event-loop pass has a fixed frame budget. No web thread or unbounded allocation
 is introduced. A saturated queue closes the call rather than silently delaying
 speech. The browser's capture worklet has two outstanding packet credits and
-a six-packet playback ceiling.
+a six-packet playback ceiling. When browser scheduling briefly falls behind,
+the worklet discards unsent capture or the oldest queued playback. WebSocket
+sequence numbers still count only transmitted packets. Sustained overload ends
+the call.
 
 ## Native endpoint boundary
 

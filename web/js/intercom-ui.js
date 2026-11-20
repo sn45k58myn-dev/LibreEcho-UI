@@ -64,7 +64,15 @@ async function startIntercom(){
     };
     call.node.port.onmessage=({data})=>{
       if(intercomCall!==call)return;
-      if(data.type==='overrun'){stopIntercom('Call ended because the phone could not keep up with live audio.');return;}
+      if(data.type==='overrun'){
+        const reasons = {
+          'capture-stalled':'Call ended because phone microphone audio stalled.',
+          'playback-stalled':'Call ended because phone playback stalled.',
+          'invalid-playback':'Call ended because the phone received invalid room audio.'
+        };
+        stopIntercom(reasons[data.reason] || 'Call ended because the phone could not keep up with live audio.');
+        return;
+      }
       if(data.type!=='pcm'||!ready||call.ws.readyState!==WebSocket.OPEN)return;
       if(call.ws.bufferedAmount>4096){stopIntercom('Call ended because the connection became too slow.');return;}
       const packet=new ArrayBuffer(644);new DataView(packet).setUint32(0,call.sequence++);
