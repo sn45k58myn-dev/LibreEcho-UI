@@ -193,6 +193,35 @@ after one second, unless it is muted or privacy is on. Nothing streams while
 the option is off or Home Assistant does not own voice. Saves from the web UI
 keep the `esphome_server_wake` key.
 
+### Compare a staged model with server-side detection
+
+In Home Assistant mode, the Echo can listen for a staged model locally and let
+Assist transcribe the command after detection. The classifier folder name appears
+in the local wake event and in the Assist request. The stock classifier reports
+the phrase `Alexa`. The Alexa entry in the native wake selector enables local
+triggers. The owner selects the actual classifier on the Echo's wake-word page.
+
+1. Record the current selected model, sensitivity and `esphome_server_wake`
+   setting. Keep the server detector active while staging the local model.
+2. Select the committed folder and run `/etc/init.d/libreecho-waked.init restart`. Check `GET /api/v1/wake-word` for the expected
+   `wake_word`, `model_loaded: true` and `inference_active: true`. A fallback
+   to Alexa can look healthy, so check the name as well.
+3. Set `esphome_server_wake` to `false` in the existing
+   `/data/libreecho/config/web-config.json`. Restart the ESPHome voice service
+   with `/etc/init.d/libreecho-esphomed.init restart`. After HA reconnects,
+   confirm `server_wake: false` in `/run/libreecho/esphome-status.json`.
+4. Compare attempts from the same spot at the same playback volume. The increase
+   in `detected_count` counts local detections. Count spoken answers separately
+   and include a music-only interval to check for false wakes. Use the wake-word
+   sensitivity control to change one setting per run.
+5. To resume the server detector, restore the original `esphome_server_wake`
+   setting and restart the ESPHome voice service. With HA subscribed and the mic
+   unmuted, `server_wake_streaming: true` confirms the stream resumed. Restore
+   the original local model and sensitivity if you changed them.
+
+See the [owner-staged wake model API](API.md#owner-staged-wake-models) for
+selection and rollback requests.
+
 ## Bluetooth proxy (experimental, off by default)
 
 The satellite can offer Home Assistant a Bluetooth proxy that forwards raw LE

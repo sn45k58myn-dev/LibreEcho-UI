@@ -283,8 +283,8 @@ static void decode_word(struct wake_worker_impl *worker,
             ""
         };
 
-        /* The event names the word that fired, at most 23 characters. */
-        snprintf(event.model_name, sizeof(event.model_name), "%.*s", (int)(sizeof(event.model_name) - 1), word->name);
+        /* Both event and classifier labels hold a complete staged model ID. */
+        snprintf(event.model_name, sizeof(event.model_name), "%s", word->name);
         worker->callback(&event, worker->callback_opaque);
     }
 }

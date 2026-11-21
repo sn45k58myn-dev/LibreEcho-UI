@@ -184,8 +184,8 @@ static void run_two_words(const float *scores1, const float *scores2,
 
     assert(le_wake_worker_start_words(&worker, "/usr/share/x/openwakeword", 1,
                                       ACCEPT_THRESHOLD,
-                                      "/data/x/twin-word/alexa_v0.1.onnx",
-                                      "twin-word", on_wake_event,
+                                      "/data/x/second-word-with-a-long-folder-name/alexa_v0.1.onnx",
+                                      "second-word-with-a-long-folder-name", on_wake_event,
                                       capture) == 0);
     for (i = 0; i < count; ++i) {
         struct le_wake_observation observation;
@@ -385,7 +385,7 @@ int main(void)
         /* Only the second word fires: its event carries its own name. */
         run_two_words(quiet, measured, vad_active, 4, &capture, &metrics);
         assert(capture.count == 1);
-        assert(strcmp(capture.events[0].model_name, "twin-word") == 0);
+        assert(strcmp(capture.events[0].model_name, "second-word-with-a-long-folder-name") == 0);
         assert(close_to(capture.events[0].score, 0.554f));
         assert(capture.events[0].detection_sample == 3u * BLOCK_SAMPLES);
         assert(metrics.events == 1);
@@ -401,7 +401,7 @@ int main(void)
         run_two_words(measured, measured, vad_active, 4, &capture, &metrics);
         assert(capture.count == 2);
         assert(strcmp(capture.events[0].model_name, "alexa_v0.1") == 0);
-        assert(strcmp(capture.events[1].model_name, "twin-word") == 0);
+        assert(strcmp(capture.events[1].model_name, "second-word-with-a-long-folder-name") == 0);
         assert(metrics.events == 2);
         assert(metrics.scores == 4);
 

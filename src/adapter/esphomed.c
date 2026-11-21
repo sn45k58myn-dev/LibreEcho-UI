@@ -14,6 +14,7 @@
 #include "../config_store.h"
 #include "../json.h"
 #include "../esphome_health.h"
+#include "../wake_model.h"
 #include "../timezone.h"
 #include "adapter.h"
 #include "esphome_ble_proxy.h"
@@ -390,7 +391,8 @@ static void turn_clear(const char *result,int notify){int active=S.turn||S.playi
  if(S.voice_open){S.voice_open=0;event_send(ACTIVITY_VOICE_KEY,strcmp(result,"success")?"stopped":"finished");}/* Error flash only for a turn that was really interrupted: an idle HA
  * reconnect is not a user-visible failure. */
  profile(active&&!server&&strcmp(result,"success")&&strcmp(result,"cancelled")&&strcmp(result,"intercom")?"error":"idle");status_write();all_states();}
-static int voice_start(uint64_t sample,int continued);
+/* Continuation turns omit the detected wake phrase in the native request. */
+static int voice_start(uint64_t sample,const char *word);
 static void cancel_turn(const char *reason){if(S.turn&&S.owner>=0){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,1,0);(void)send_writer(&S.clients[S.owner],90,&w);}turn_clear(reason,S.announcement);}
 /* Both markers expire: a companion crash cannot permanently disable Assist. */
 static void intercom_tick(void){static uint64_t refreshed;int hold=le_ic_lease_active(LE_IC_LEASE,S.now);if(hold){if(S.turn)cancel_turn("intercom");if(S.now-refreshed>=250){refreshed=S.now;(void)le_ic_lease_write(LE_IC_ACK,S.now);}}else if(refreshed){refreshed=0;unlink(LE_IC_ACK);}}
@@ -402,17 +404,17 @@ static void user_cancel(const char *source){if(!S.turn)return;fprintf(stderr,"es
 /* A second wake word while HA is thinking cancels that request. Listening and
  * replying are left to the button, HA and the stop word: there the user's own
  * command or the reply's echo could re-trigger the word. */
-static void wake_detected(uint64_t sample){if(S.turn==3&&S.pipeline&&!S.announcement&&S.active_wake){user_cancel("wake word");return;}(void)voice_start(sample,0);}
+static void wake_detected(uint64_t sample,const char *word){if(S.turn==3&&S.pipeline&&!S.announcement&&S.active_wake){user_cancel("wake word");return;}(void)voice_start(sample,word);}
 /* Server-wake streaming ends with a stop request, never the on-device end-of-speech path. */
 static void stop_capture(const char *reason){if(S.server_turn)cancel_turn(reason);else capture_end();}
 static void client_close(unsigned i){struct client *c=&S.clients[i];if(c->fd>=0)close(c->fd);c->fd=-1;le_ble_proxy_close(&B,(int)i);if(S.owner==(int)i){cancel_turn("disconnected");S.owner=-1;timer_owner_end();}en_free(&c->noise);memset(c,0,sizeof *c);c->fd=-1;status_write();}
-static int voice_start(uint64_t sample,int continued){unsigned char b[256];struct ep_writer w={b,sizeof b,0,0};if(!S.ha_selected||S.owner<0||S.turn||S.now<S.cancel_guard||mic_muted()||(!continued&&!S.active_wake))return -1;
+static int voice_start(uint64_t sample,const char *word){unsigned char b[256];struct ep_writer w={b,sizeof b,0,0};if(!S.ha_selected||S.owner<0||S.turn||S.now<S.cancel_guard||mic_muted()||(word&&!S.active_wake))return -1;
  ep_uint(&w,1,1);ep_string(&w,2,S.conversation);/* flags: USE_VAD only. USE_WAKE_WORD asks Home Assistant to run its own
     wake-word engine on the stream (ESPHome use_wake_word: true); the word was
     already detected here, so HA must start at STT -- with no HA wake engine the
     run otherwise fails instantly with wake-engine-missing. */
- ep_uint(&w,3,1);if(!continued)ep_string(&w,5,"Alexa");if(send_writer(&S.clients[S.owner],90,&w))return -1;
- S.capture_next=sample>3200?sample-3200:0;if(S.capture_next<S.ring_first)S.capture_next=S.ring_first;S.turn=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=S.run_end=S.early_tts=S.tts_done=0;S.tts_url[0]=S.next_url[0]=0;S.announcement=0;S.pipeline=1;S.voice_chime_started=0;voice_chime_start();S.voice_open=1;if(!continued)event_send(ACTIVITY_VOICE_KEY,"wake_word");event_send(ACTIVITY_VOICE_KEY,"listening");profile("listening");status_write();return 0;
+ ep_uint(&w,3,1);if(word)ep_string(&w,5,word);if(send_writer(&S.clients[S.owner],90,&w))return -1;
+ S.capture_next=sample>3200?sample-3200:0;if(S.capture_next<S.ring_first)S.capture_next=S.ring_first;S.turn=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=S.run_end=S.early_tts=S.tts_done=0;S.tts_url[0]=S.next_url[0]=0;S.announcement=0;S.pipeline=1;S.voice_chime_started=0;voice_chime_start();S.voice_open=1;if(word)event_send(ACTIVITY_VOICE_KEY,"wake_word");event_send(ACTIVITY_VOICE_KEY,"listening");profile("listening");status_write();return 0;
 }
 /* Server-side wake (esphome_server_wake, off by default): open an ESPHome run with
  * USE_VAD|USE_WAKE_WORD and no phrase, then stream the mic continuously so Home
@@ -427,7 +429,7 @@ static int server_listen_start(void){unsigned char b[160];struct ep_writer w={b,
 static int playback_start(const char *url){if(!url[0]||S.playing)return -1;if(esp_playback_start(&S.playback,url,S.bus_path,S.ca_path,S.now)<0){esp_playback_close(&S.playback);return -1;}if(S.pipeline)S.assist_reply.observed|=ASSIST_PLAYBACK_STARTED;S.playing=1;S.turn=4;all_states();event_send(ACTIVITY_PLAYBACK_KEY,"started");return 0;}
 /* HA may await the drain ack before RUN_END. Ack once, but keep this pipeline
  * alive until RUN_END so its delayed event cannot address a new capture. */
-static void completed(void){if(!S.tts_done)(void)announce_done(1);S.tts_done=1;if(S.pipeline&&!S.run_end)return;char conv[128];int cont=S.continue_turn;snprintf(conv,sizeof conv,"%s",S.conversation);turn_clear("success",0);if(cont&&!mic_muted()){snprintf(S.conversation,sizeof S.conversation,"%s",conv);(void)voice_start(S.ring_end,1);}}
+static void completed(void){if(!S.tts_done)(void)announce_done(1);S.tts_done=1;if(S.pipeline&&!S.run_end)return;char conv[128];int cont=S.continue_turn;snprintf(conv,sizeof conv,"%s",S.conversation);turn_clear("success",0);if(cont&&!mic_muted()){snprintf(S.conversation,sizeof S.conversation,"%s",conv);(void)voice_start(S.ring_end,NULL);}}
 static int valid_proto(const void *p,size_t n){struct ep_reader r;struct ep_field f;ep_reader_init(&r,p,n);while(ep_next(&r,&f)>0){}return r.error?-1:0;}
 static void device_info(struct client *c){unsigned char b[512];struct ep_writer w={b,sizeof b,0,0};ep_string(&w,2,S.name);ep_string(&w,3,S.mac);ep_string(&w,4,"2026.9.0");ep_string(&w,6,"radar-puffin");ep_string(&w,8,"libreecho.satellite");ep_string(&w,9,"0.14.0");ep_string(&w,12,"LibreEcho");ep_string(&w,13,S.friendly);if(S.room[0])ep_string(&w,16,S.room);ep_uint(&w,15,S.ble_proxy?LE_BLE_PROXY_FEATURES:0);ep_uint(&w,17,61);ep_uint(&w,19,1);ep_uint(&w,26,!S.provisioned);(void)send_writer(c,10,&w);}
 /* User-defined ESPHome services (#397): Home Assistant automations call announce, play_sound and
@@ -705,8 +707,26 @@ static void stream_tick(struct io *j,int audio){if(j->fd<0)return;
  if(audio){char format[32];int rate,channels,header,indexed;if(json_get_string(j->rx,"format",format,sizeof format)<=0||strcmp(format,"pcm_s16_le")||json_get_int(j->rx,"sample_rate",&rate)<=0||rate!=16000||json_get_int(j->rx,"channels",&channels)<=0||channels!=1||json_get_int(j->rx,"frame_header_bytes",&header)<=0||header!=24||json_get_bool(j->rx,"sample_indexed",&indexed)<=0||!indexed){stream_loss(j);return;}}
  size_t used=(size_t)(end-j->rx)+1;memmove(j->rx,j->rx+used,j->rx_n-used);j->rx_n-=used;j->stage=3;j->deadline=UINT64_MAX;}
  if(!audio){/* Bounded event lines, including fragmented/coalesced reads. */
- for(unsigned loop=0;loop<8;loop++){char *end=memchr(j->rx,'\n',j->rx_n);if(!end)break;*end=0;long long sample;char event[64];if(json_get_string(j->rx,"event",event,sizeof event)>0&&!strcmp(event,"wake_detected")){char model[TEXT_VALUE_MAX];if(json_get_string(j->rx,"model",model,sizeof model)>0)text_set(TEXT_WAKE_KEY,model);}
- if(json_get_string(j->rx,"event",event,sizeof event)>0&&!strcmp(event,"wake_detected")&&json_get_int64(j->rx,"detection_sample",&sample)>0&&sample>=0&&!S.server_wake)wake_detected((uint64_t)sample);size_t z=(size_t)(end-j->rx)+1;memmove(j->rx,j->rx+z,j->rx_n-z);j->rx_n-=z;}
+ for(unsigned loop=0;loop<8;loop++){
+     char *end=memchr(j->rx,'\n',j->rx_n);
+     char event[64];
+     if(!end)break;
+     *end=0;
+     if(json_get_string(j->rx,"event",event,sizeof event)>0 && !strcmp(event,"wake_detected")){
+         char model[LE_WAKE_MODEL_NAME_MAX];
+         const char *word=LE_WAKE_MODEL_STOCK_PHRASE;
+         long long sample;
+         if(json_get_string(j->rx,"model",model,sizeof model)>0 && model[0]){
+             text_set(TEXT_WAKE_KEY,model);
+             if(strcmp(model,LE_WAKE_MODEL_STOCK_NAME))word=model;
+         }
+         if(!S.server_wake && json_get_int64(j->rx,"detection_sample",&sample)>0 && sample>=0)
+             wake_detected((uint64_t)sample,word);
+     }
+     size_t used=(size_t)(end-j->rx)+1;
+     memmove(j->rx,j->rx+used,j->rx_n-used);
+     j->rx_n-=used;
+ }
  if(j->rx_n==sizeof j->rx-1){stream_loss(j);return;}ssize_t n=recv(j->fd,j->rx+j->rx_n,sizeof j->rx-1-j->rx_n,MSG_DONTWAIT);if(n>0){j->rx_n+=(size_t)n;j->rx[j->rx_n]=0;}else if(!n||(errno!=EAGAIN&&errno!=EWOULDBLOCK&&errno!=EINTR))stream_loss(j);return;
  }
  /* First consume bytes coalesced with the JSON stream handshake. */
@@ -806,7 +826,10 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  memset(&a,0,sizeof a);a.sin_family=AF_INET;a.sin_port=htons((uint16_t)port);if(inet_pton(AF_INET,bind_addr,&a.sin_addr)!=1)return 2;
  listener=socket(AF_INET,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);int yes=1;if(listener<0)return 1;(void)setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof yes);if(bind(listener,(struct sockaddr*)&a,sizeof a)||listen(listener,CLIENTS)){close(listener);return 1;}
  {struct stat st;if(fstat(listener,&st)||!le_eh_start((int)getpid(),S.process_start)||!le_eh_boot(S.boot_id)){close(listener);return 1;}snprintf(S.listener_inode,sizeof S.listener_inode,"%llu",(unsigned long long)st.st_ino);S.listener_port=port;}
- signal(SIGINT,sigstop);signal(SIGTERM,sigstop);signal(SIGHUP,sigstop);signal(SIGPIPE,SIG_IGN);S.now=now_ms();
+ signal(SIGINT,sigstop);signal(SIGTERM,sigstop);signal(SIGPIPE,SIG_IGN);
+ struct sigaction hup={0};hup.sa_handler=sigstop;sigemptyset(&hup.sa_mask);
+ if(sigaction(SIGHUP,&hup,NULL)<0)return 1;
+ S.now=now_ms();
  /* Without the button socket the satellite still runs; only button events are lost. */
  S.button_fd=button_socket_open(S.button_path);if(S.button_fd<0)fprintf(stderr,"esphomed: button event socket unavailable; hardware button events disabled\n");
  /* timerd outlives this process. Fence replacement events until a retried
@@ -817,7 +840,12 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  /* A set_ring overlay from before a restart must not run on: HA starts from off. */
  (void)job(S.led_path,"pattern","{\"name\":\"stop\",\"owner\":\"" SERVICE_RING_OWNER "\"}",0,0);
  while(running){struct pollfd fds[2+CLIENTS];fds[0]=(struct pollfd){listener,POLLIN,0};for(unsigned i=0;i<CLIENTS;i++)fds[i+1]=(struct pollfd){S.clients[i].fd,(short)(POLLIN|(S.clients[i].tx_n?POLLOUT:0)),0};fds[1+CLIENTS]=(struct pollfd){S.button_fd,POLLIN,0};int ready=poll(fds,2+CLIENTS,10);S.now=now_ms();if(ready<0&&errno!=EINTR)break;
- if(reload_config){reload_config=0;for(unsigned i=0;i<CLIENTS;i++)client_close(i);if(load_configuration())break;}
+ if(reload_config){
+     reload_config=0;
+     for(unsigned i=0;i<CLIENTS;i++)client_close(i);
+     if(load_configuration())break;
+     status_write();
+ }
  if(fds[0].revents&POLLIN){for(unsigned n=0;n<4;n++){int fd=accept(listener,NULL,NULL);if(fd<0)break;int flags=fcntl(fd,F_GETFL,0);if(flags<0||fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0){close(fd);continue;}unsigned idx;for(idx=0;idx<CLIENTS;idx++)if(S.clients[idx].fd<0)break;if(idx==CLIENTS){close(fd);continue;}struct client *c=&S.clients[idx];memset(c,0,sizeof *c);c->fd=fd;c->mode=-1;c->deadline=S.now+15000;c->last_seen=S.now;en_init(&c->noise);}}
  intercom_tick();
  for(unsigned i=0;i<CLIENTS;i++)client_tick(i,fds[i+1].revents);

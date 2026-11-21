@@ -1,6 +1,7 @@
 #ifndef LIBREECHO_WAKE_WORKER_H
 #define LIBREECHO_WAKE_WORKER_H
 
+#include "../wake_model.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -24,7 +25,7 @@ struct le_wake_event {
      * Events cross a nonblocking in-process pipe. Keep the message
      * self-contained rather than copying a process-local pointer.
      */
-    char model_name[24];
+    char model_name[LE_WAKE_MODEL_NAME_MAX];
 };
 
 struct le_wake_worker_metrics {

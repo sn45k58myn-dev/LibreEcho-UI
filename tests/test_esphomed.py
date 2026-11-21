@@ -72,7 +72,7 @@ class Adapter:
   self.streams['stream_audio'].sendall(struct.pack('<IHHQII',0x3153564c,1,0,first,count,0)+struct.pack('<'+'h'*count,*[(first+i)%30000 for i in range(count)]))
  def pcm(self,first,values):
   self.streams['stream_audio'].sendall(struct.pack('<IHHQII',0x3153564c,1,0,first,len(values),0)+struct.pack('<'+'h'*len(values),*values))
- def wake(self,sample):self.streams['subscribe'].sendall((json.dumps({'v':1,'event':'wake_detected','data':{'detection_sample':sample,'score':1,'model':'Alexa'}})+'\n').encode())
+ def wake(self,sample,model='Alexa'):self.streams['subscribe'].sendall((json.dumps({'v':1,'event':'wake_detected','data':{'detection_sample':sample,'score':1,'model':model}})+'\n').encode())
  def close(self):
   self.stop=True;self.thread.join(2);self.sock.close()
   for c in self.clients:
@@ -295,8 +295,17 @@ class Fixture(Daemon):
  def test_wake_start_requests_stt_not_ha_wake_word(self):
   # The wake word is detected on the device; asking HA to run its own wake
   # engine (USE_WAKE_WORD, bit 1) makes HA fail the run with wake-engine-missing.
-  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams();a.samples(0);time.sleep(.1);a.wake(100)
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams();a.samples(0);time.sleep(.1);a.wake(100,'alexa_v0.1')
   t,b=receive(self.s);self.assertEqual(t,90);self.assertIn(num(3,1),b);self.assertNotIn(num(3,3),b);self.assertIn(text(5,'Alexa'),b)
+ def test_custom_local_wake_sends_detected_model_to_assist(self):
+  model='my_local_fixture_word_for_music'
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)))
+  detector=self.adapters['wake'];detector.wait_streams();detector.samples(0);detector.wake(100,model)
+  kind,payload=receive(self.s)
+  self.assertEqual(kind,90)
+  self.assertIn(num(3,1),payload)
+  self.assertIn(text(5,model),payload)
+  self.assertNotIn(text(5,'Alexa'),payload)
  def test_no_tts_run_end_continues_and_preserves_timers(self):
   self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams();a.samples(0);time.sleep(.1);a.wake(100);self.assertEqual(receive(self.s)[0],90);self.s.sendall(frame(91))
   clears=len([r for r in self.adapters['timer'].calls if r['cmd']=='remote_clear'])
@@ -305,7 +314,7 @@ class Fixture(Daemon):
   for _ in range(8):
    messages.append(receive(self.s))
    if messages[-1][0]==90:break
-  ended=next(i for i,(t,b) in enumerate(messages) if t==106 and b==num(2,1));done=next(i for i,(t,b) in enumerate(messages) if t==120);self.assertLess(ended,done);self.assertEqual(messages[-1][0],90);self.assertIn(text(2,'no-tts-conversation'),messages[-1][1]);self.assertEqual(len([r for r in self.adapters['timer'].calls if r['cmd']=='remote_clear']),clears)
+  ended=next(i for i,(t,b) in enumerate(messages) if t==106 and b==num(2,1));done=next(i for i,(t,b) in enumerate(messages) if t==120);self.assertLess(ended,done);self.assertEqual(messages[-1][0],90);self.assertIn(text(2,'no-tts-conversation'),messages[-1][1]);self.assertNotIn(text(5,'Alexa'),messages[-1][1]);self.assertEqual(len([r for r in self.adapters['timer'].calls if r['cmd']=='remote_clear']),clears)
  def test_empty_wake_selection_survives_reload_without_local_config_loss(self):
   import signal
   saved=json.loads(self.config.read_text());saved['wake_word']='Local saved word';self.config.write_text(json.dumps(saved));self.hello();self.s.sendall(frame(123));self.assertEqual(receive(self.s)[0],122)
@@ -501,13 +510,36 @@ class ServerWakeIgnoresDeviceWake(Daemon):
   self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams()
   for i in range(0,6400,320):a.samples(i)
   t,b=receive(self.s);self.assertEqual(t,90)
-  self.s.sendall(frame(91));self.s.sendall(frame(92,num(1,2)));time.sleep(.1);a.wake(4000)
+  self.s.sendall(frame(91));self.s.sendall(frame(92,num(1,2)));time.sleep(.1);a.wake(4000,'my_local_word')
   # The run restarts after the server-wake retry delay, never from the device wake.
   messages=[]
   while True:
    t,b=receive(self.s);messages.append((t,b))
    if t==90:break
-  self.assertIn(num(3,3),messages[-1][1]);self.assertNotIn(b'Alexa',messages[-1][1])
+  self.assertIn(num(3,3),messages[-1][1]);self.assertNotIn(b'Alexa',messages[-1][1]);self.assertNotIn(b'my_local_word',messages[-1][1])
+class SwitchWakeDetector(Daemon):
+ config_fields=SERVER_WAKE_CONFIG
+ def test_reloading_owner_setting_switches_detector_and_back(self):
+  import signal
+  detector=self.adapters['wake']
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));detector.wait_streams()
+  detector.samples(0)
+  msg,run=receive(self.s);self.assertEqual(msg,90);self.assertIn(num(3,3),run)
+  for server in (False,True):
+   config=json.loads(self.config.read_text())
+   config['esphome_server_wake']=server
+   self.config.write_text(json.dumps(config))
+   self.proc.send_signal(signal.SIGHUP)
+   until=time.monotonic()+3
+   while server_wake_status(self.p)['server_wake']!=server:
+    self.assertLess(time.monotonic(),until);time.sleep(.02)
+   self.s=self.connect();self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)))
+   if not server:detector.wake(100,'local_test_model')
+   msg,run=receive(self.s);self.assertEqual(msg,90)
+   if server:
+    self.assertIn(num(3,3),run);self.assertNotIn(b'local_test_model',run)
+   else:
+    self.assertIn(num(3,1),run);self.assertIn(text(5,'local_test_model'),run)
 class ServerWakeMuteStops(Daemon):
  config_fields=SERVER_WAKE_CONFIG
  def test_mute_stops_the_stream_and_unmute_resumes_it(self):

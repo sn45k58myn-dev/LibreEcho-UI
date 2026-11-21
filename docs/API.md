@@ -2789,8 +2789,10 @@ cannot be removed (`409`); select the stock model first.
 
 The wake status reports the loaded model: `wake_word` is `Alexa` for the stock
 model and the folder name for an owner-staged one, and `model` is `alexa_v0.1` or
-the folder name. Detection events carry at most 23 characters of the name. The
-ESPHome/Home Assistant wake selection still reports and accepts only `Alexa`.
+the folder name. A local detection event carries the complete model ID. In Home
+Assistant mode the satellite sends that ID with the Assist start request, using
+`Alexa` for the stock model. The native wake selector retains its legacy Alexa
+entry as the on/off control. Use the model endpoint above to choose the classifier.
 
 #### POST /api/v1/wake-word/test
 
