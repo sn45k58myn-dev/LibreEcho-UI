@@ -11,7 +11,6 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <math.h>
-#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +26,31 @@ static int64_t monotonic_ms(void)
     if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
         return -1;
     return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/* The daemon writes full 10 ms packets. Wait for an entire packet with one
+ * bounded receive, then let the production frame reader validate and consume it.
+ * A peer that leaves a partial packet cannot extend the overall watchdog. */
+static const char *read_trial_frame(int fd, int64_t remaining_ms, struct le_voice_stream_frame *frame)
+{
+    unsigned char packet[LE_VOICE_STREAM_HEADER_BYTES + LE_VOICE_FRAME_SAMPLES * sizeof(int16_t)];
+    int64_t wait_ms = remaining_ms < 1000 ? remaining_ms : 1000;
+    struct timeval timeout = { .tv_sec = wait_ms / 1000, .tv_usec = (wait_ms % 1000) * 1000 };
+    ssize_t received;
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0)
+        return "stream_error";
+    received = recv(fd, packet, sizeof(packet), MSG_PEEK | MSG_WAITALL);
+    if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        return remaining_ms <= 1000 ? "deadline" : "timeout";
+    if (received == 0)
+        return "stream_closed";
+    /* A corrupt header must not make the reader wait for an oversized payload. */
+    if (received != (ssize_t)sizeof(packet) || packet[16] != LE_VOICE_FRAME_SAMPLES ||
+        packet[17] || packet[18] || packet[19] ||
+        le_voice_stream_read_frame(fd, frame) != 1 || frame->flags ||
+        frame->sample_count != LE_VOICE_FRAME_SAMPLES)
+        return "incomplete_or_invalid_frame";
+    return NULL;
 }
 
 static int open_stream(void)
@@ -91,11 +115,11 @@ int main(int argc, char **argv)
     struct le_wake_worker_metrics metrics = {0};
     struct le_voice_stream_frame frame;
     struct le_voice_vad vad;
-    struct pollfd pollfd = { .fd = -1, .events = POLLIN };
     unsigned seconds, floor = LE_VOICE_VAD_DEFAULT_FLOOR_RMS, frames = 0, voiced = 0;
+    unsigned target_frames;
     uint64_t next_sample = 0;
     int64_t started, deadline, now;
-    int playing;
+    int playing, fd;
     float threshold;
     char *end, reason[160];
     const char *invalid = NULL;
@@ -124,40 +148,33 @@ int main(int argc, char **argv)
         fputs("wake classifier failed to start\n", stderr);
         return 1;
     }
-    pollfd.fd = open_stream();
+    fd = open_stream();
     started = monotonic_ms();
-    deadline = started + (int64_t)seconds * 1000;
-    if (pollfd.fd < 0)
+    target_frames = seconds * (LE_VOICE_RATE / LE_VOICE_FRAME_SAMPLES);
+    /* Count audio using the capture clock; use wall time only as a watchdog. */
+    deadline = started + (int64_t)seconds * 1000 + 2000;
+    if (fd < 0)
         invalid = "stream_unavailable";
     else if (started < 0)
         invalid = "clock";
     else
         printf("ready seconds=%u mode=%s threshold=%.4f vad_floor=%u\n", seconds, argv[3], threshold, floor);
-    while (!invalid) {
+    while (!invalid && frames < target_frames) {
         struct le_voice_vad_result speech;
         struct le_wake_observation observation;
-        int readable, submitted;
+        int submitted;
         now = monotonic_ms();
         if (now < started) {
             invalid = "clock";
             break;
         }
-        if (now >= deadline)
-            break;
-        readable = poll(&pollfd, 1, deadline - now > 1000 ? 1000 : (int)(deadline - now));
-        if (readable < 0 && errno == EINTR)
-            continue;
-        if (readable == 0 && deadline - now <= 1000)
-            break;
-        if (readable <= 0 || !(pollfd.revents & POLLIN)) {
-            invalid = readable == 0 ? "timeout" : "stream_closed";
+        if (now >= deadline) {
+            invalid = "deadline";
             break;
         }
-        if (le_voice_stream_read_frame(pollfd.fd, &frame) != 1 ||
-            frame.flags || frame.sample_count != LE_VOICE_FRAME_SAMPLES) {
-            invalid = "incomplete_or_invalid_frame";
+        invalid = read_trial_frame(fd, deadline - now, &frame);
+        if (invalid)
             break;
-        }
         if ((frames && frame.first_sample != next_sample) ||
             frame.first_sample > UINT64_MAX - frame.sample_count) {
             invalid = "sample_gap";
@@ -177,14 +194,11 @@ int main(int argc, char **argv)
         if (submitted != 0)
             invalid = submitted > 0 ? "worker_drop" : "worker_failed";
     }
-    if (pollfd.fd >= 0)
-        close(pollfd.fd);
+    if (fd >= 0)
+        close(fd);
     le_wake_worker_stop(&worker, &metrics); /* drains complete queued blocks before reporting */
     if (!invalid && (metrics.failed || metrics.dropped_blocks || !metrics.scores))
         invalid = "inference_incomplete";
-    /* Tolerate scheduler/period alignment at the bounds only (two 10 ms frames). */
-    if (!invalid && frames + 2 < seconds * (LE_VOICE_RATE / LE_VOICE_FRAME_SAMPLES))
-        invalid = "short_capture";
     printf("summary valid=%d reason=%s frames=%u voiced=%u scores=%" PRIu64
            " detections=%" PRIu64 " dropped=%" PRIu64 " max_score=%.4f max_inference_us=%u\n",
            !invalid, invalid ? invalid : "complete", frames, voiced, metrics.scores,
