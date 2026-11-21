@@ -4,6 +4,7 @@
 #define LE_INIT_TTSD "build/libreecho-pr152-ttsd.init"
 #define LE_INIT_MDNSD "build/test-control-no-mdns.init"
 #define LE_INIT_ESPHOMED "build/libreecho-pr152-esphomed.init"
+#define LE_INIT_INTERCOMD "build/libreecho-pr152-intercomd.init"
 #include "../src/api.c"
 
 #include <assert.h>
@@ -13,7 +14,7 @@
 #include <unistd.h>
 
 static const char *const init_paths[] = {
-    LE_INIT_AGENTD, LE_INIT_STTD, LE_INIT_TTSD, LE_INIT_ESPHOMED
+    LE_INIT_AGENTD, LE_INIT_STTD, LE_INIT_TTSD, LE_INIT_ESPHOMED, LE_INIT_INTERCOMD
 };
 
 static void write_init_script(const char *path, int status)

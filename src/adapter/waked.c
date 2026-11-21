@@ -1,3 +1,4 @@
+#define _GNU_SOURCE 1
 #define _POSIX_C_SOURCE 200809L
 
 #include "adapter.h"
@@ -39,7 +40,6 @@
     "/usr/share/libreecho/openwakeword"
 #define MIC_BUFFER_BYTES (LE_VOICE_AEC_FRAME_SAMPLES * 2U * 8U)
 #define PREROLL_SAMPLES (LE_VOICE_AEC_RATE * 3U)
-#define REFERENCE_TIMEOUT_NS 250000000ULL
 #define WAKE_ACCEPT_THRESHOLD 0.55f
 /* The classifier of a model folder: the one file a second word needs. */
 #define WAKE_CLASSIFIER_FILE "alexa_v0.1.onnx"
@@ -75,6 +75,9 @@ struct waked_ipc {
     int event_pipe[2];
     int subscribers[MAX_WAKE_SUBSCRIBERS];
     int audio_subscribers[MAX_AUDIO_SUBSCRIBERS];
+    int intercom_profile, intercom_fd;
+    unsigned int intercom_gaps, intercom_overruns;
+    struct le_voice_call_aec intercom_aec;
     unsigned int detected_count;
     unsigned int clap_count;
     unsigned int smoke_alarm_count;
@@ -193,10 +196,11 @@ static int respond(int fd, unsigned long id, int ok,
         ? -1 : write_all(fd, response, (size_t)length);
 }
 
-static int connect_mic_stream(const char *socket_path)
+static int connect_mic_stream(const char *socket_path, int *aec_headroom)
 {
     static const char request[] =
-        "{\"v\":1,\"id\":1,\"cmd\":\"stream_mono\",\"args\":{}}\n";
+        "{\"v\":1,\"id\":1,\"cmd\":\"stream_mono\","
+        "\"args\":{\"aec_headroom\":true}}\n";
     struct sockaddr_un address;
     char response[1024];
     size_t used = 0;
@@ -234,6 +238,10 @@ static int connect_mic_stream(const char *socket_path)
     }
     if (set_nonblocking(fd) < 0)
         goto fail;
+    /* Older micd versions ignore the request. Restore gain only if the
+       stream header confirms the reduced capture gain. */
+    *aec_headroom = 0;
+    (void)json_get_bool(response, "aec_headroom", aec_headroom);
     return fd;
 
 fail:
@@ -532,6 +540,66 @@ static int subscriber_gone(int fd)
     return 0;
 }
 
+static int echo2_intercom_profile(const char *target_path)
+{
+    char line[192];
+    FILE *target = fopen(target_path, "r");
+    int matched = 0;
+    if (!target)
+        return 0;
+    while (fgets(line, sizeof(line), target)) {
+        if (!strncmp(line, "target_id=", 10)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            matched = !strcmp(line, "target_id=radar_puffin");
+            break;
+        }
+    }
+    fclose(target);
+    return matched;
+}
+
+/* The companion subscribes only after the normal intercom permission, privacy,
+ * and call-indicator checks. The stream request itself is shared with Assist. */
+static int intercom_peer(int fd, const char *installed_path, uid_t service_uid)
+{
+#if defined(__linux__) && defined(SO_PEERCRED)
+    struct ucred peer;
+    socklen_t n = sizeof(peer);
+    struct stat running_file, installed;
+    char proc[64];
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &n) < 0 ||
+        n != sizeof(peer) || peer.uid != service_uid || peer.pid <= 0)
+        return 0;
+    snprintf(proc, sizeof(proc), "/proc/%ld/exe", (long)peer.pid);
+    return stat(proc, &running_file) == 0 && stat(installed_path, &installed) == 0 &&
+        S_ISREG(installed.st_mode) && installed.st_uid == service_uid &&
+        !(installed.st_mode & 022) && installed.st_dev == running_file.st_dev &&
+        installed.st_ino == running_file.st_ino;
+#else
+    (void)fd; (void)installed_path; (void)service_uid;
+    return 0;
+#endif
+}
+
+static void close_audio_subscriber(struct waked_ipc *ipc, size_t slot)
+{
+    int fd = ipc->audio_subscribers[slot];
+    if (fd == ipc->intercom_fd) {
+        le_voice_call_aec_destroy(&ipc->intercom_aec);
+        ipc->intercom_fd = -1;
+    }
+    close(fd);
+    ipc->audio_subscribers[slot] = -1;
+}
+
+static void start_intercom_aec(struct waked_ipc *ipc, int fd, const char *executable, uid_t uid)
+{
+    if (ipc->intercom_profile && ipc->intercom_fd < 0 &&
+        intercom_peer(fd, executable, uid) &&
+        le_voice_call_aec_init(&ipc->intercom_aec) == 0)
+        ipc->intercom_fd = fd;
+}
+
 static void reap_subscribers(struct waked_ipc *ipc)
 {
     size_t i;
@@ -545,8 +613,7 @@ static void reap_subscribers(struct waked_ipc *ipc)
     for (i = 0; i < MAX_AUDIO_SUBSCRIBERS; ++i) {
         if (ipc->audio_subscribers[i] >= 0 &&
             subscriber_gone(ipc->audio_subscribers[i])) {
-            close(ipc->audio_subscribers[i]);
-            ipc->audio_subscribers[i] = -1;
+            close_audio_subscriber(ipc, i);
         }
     }
 }
@@ -582,7 +649,7 @@ static int add_audio_subscriber(struct waked_ipc *ipc, int client_fd)
 static void publish_audio_frame(struct waked_ipc *ipc,
                                 uint64_t first_sample,
                                 const int16_t *samples,
-                                size_t count)
+                                size_t count, const int16_t *intercom_samples)
 {
     size_t i;
 
@@ -592,10 +659,9 @@ static void publish_audio_frame(struct waked_ipc *ipc,
         if (fd < 0)
             continue;
         if (le_voice_stream_write_frame(
-                fd, first_sample, samples, count, 0) < 0) {
-            close(fd);
-            ipc->audio_subscribers[i] = -1;
-        }
+                fd, first_sample, fd == ipc->intercom_fd ? intercom_samples : samples,
+                count, 0) < 0)
+            close_audio_subscriber(ipc, i);
     }
 }
 
@@ -640,6 +706,7 @@ static void handle_control_client(
             "\"cpu_cost\":17,\"memory_cost_mb\":6,"
             "\"vad_active\":%s,\"vad_floor_rms\":%u,"
             "\"vad_noise_energy\":%llu,\"aec_active\":%s,"
+            "\"intercom_aec_active\":%s,"
             "\"model_loaded\":%s,\"processed_frames\":%llu,"
             "\"capture_active\":%s,\"capture_age_ms\":%d,"
             "\"inference_active\":%s,\"inference_age_ms\":%d,"
@@ -653,6 +720,7 @@ static void handle_control_client(
             metrics->vad_floor_rms,
             (unsigned long long)metrics->vad_noise_energy,
             metrics->playback_active ? "true" : "false",
+            ipc->intercom_fd >= 0 ? "true" : "false",
             model_loaded ? "true" : "false", (unsigned long long)metrics->processed_frames,
             metrics->processed_frames && le_wake_recent(capture_age_ms, LE_WAKE_CAPTURE_STALE_MS) ? "true" : "false", capture_age_ms,
             model_loaded && le_wake_recent(inference_age_ms, LE_WAKE_INFERENCE_STALE_MS) ? "true" : "false", inference_age_ms,
@@ -695,10 +763,13 @@ static void handle_control_client(
             size_t i;
 
             for (i = 0; i < MAX_AUDIO_SUBSCRIBERS; ++i) {
-                if (ipc->audio_subscribers[i] == client_fd)
-                    ipc->audio_subscribers[i] = -1;
+                if (ipc->audio_subscribers[i] == client_fd) {
+                    close_audio_subscriber(ipc, i);
+                    break;
+                }
             }
-            close(client_fd);
+        } else {
+            start_intercom_aec(ipc, client_fd, "/usr/local/sbin/libreecho-intercomd", 0);
         }
         return;
     } else if (!strcmp(command, "set_sensitivity")) {
@@ -812,6 +883,7 @@ static int process_frame(struct le_voice_aec *aec,
                          struct le_wake_worker *wake_worker,
                          struct waked_ipc *ipc,
                          const int16_t *microphone,
+                         int aec_headroom,
                          int16_t *preroll,
                          size_t *preroll_position,
                          int dump_fd,
@@ -820,16 +892,16 @@ static int process_frame(struct le_voice_aec *aec,
 {
     int16_t far_end[LE_VOICE_AEC_FRAME_SAMPLES];
     int16_t clean[LE_VOICE_AEC_FRAME_SAMPLES];
+    int16_t intercom_samples[LE_VOICE_AEC_FRAME_SAMPLES];
     struct le_voice_vad_result vad_result;
     float vad_score;
     uint64_t now_ns = monotonic_nanoseconds();
     int playback_active = le_voice_reference_active(
-        reference, now_ns, REFERENCE_TIMEOUT_NS);
+        reference, now_ns, LE_VOICE_REFERENCE_TAIL_NS);
     size_t dump_count = LE_VOICE_AEC_FRAME_SAMPLES;
 
     metrics->playback_active = playback_active;
-    (void)le_voice_aec_guard_update(guard, aec, reference,
-                                    playback_active, now_ns);
+    (void)le_voice_aec_guard_update(guard, aec, reference, now_ns);
     if (playback_active) {
         le_voice_reference_read(reference, far_end,
                                 LE_VOICE_AEC_FRAME_SAMPLES);
@@ -839,6 +911,21 @@ static int process_frame(struct le_voice_aec *aec,
         memset(far_end, 0, sizeof(far_end));
         memcpy(clean, microphone, sizeof(clean));
     }
+    if (ipc->intercom_fd >= 0) {
+        if (ipc->intercom_gaps != reference->discontinuities ||
+            ipc->intercom_overruns != reference->overruns) {
+            le_voice_call_aec_reset(&ipc->intercom_aec);
+            ipc->intercom_gaps = reference->discontinuities;
+            ipc->intercom_overruns = reference->overruns;
+        }
+        le_voice_call_aec_process(&ipc->intercom_aec, microphone, far_end, intercom_samples);
+        if (!playback_active)
+            memcpy(intercom_samples, microphone, sizeof(intercom_samples));
+        if (aec_headroom)
+            le_voice_restore_headroom(intercom_samples, LE_VOICE_AEC_FRAME_SAMPLES);
+    }
+    if (aec_headroom)
+        le_voice_restore_headroom(clean, LE_VOICE_AEC_FRAME_SAMPLES);
     vad_result = le_voice_vad_process(
         vad, clean, LE_VOICE_AEC_FRAME_SAMPLES);
     vad_score = vad_result.noise_energy
@@ -861,7 +948,7 @@ static int process_frame(struct le_voice_aec *aec,
         ipc,
         (metrics->processed_frames - 1U) *
             LE_VOICE_AEC_FRAME_SAMPLES,
-        clean, LE_VOICE_AEC_FRAME_SAMPLES);
+        clean, LE_VOICE_AEC_FRAME_SAMPLES, intercom_samples);
     if (ipc->clap.enabled) {
         struct le_clap_event clap;
 
@@ -933,6 +1020,7 @@ static int run_waked(const struct waked_config *config)
     uint64_t dump_limit =
         (uint64_t)config->dump_seconds * LE_VOICE_AEC_RATE;
     int microphone_fd = -1;
+    int aec_headroom = 0;
     int dump_fd = -1;
     int result = -1;
     size_t i;
@@ -946,6 +1034,8 @@ static int run_waked(const struct waked_config *config)
     memset(&metrics, 0, sizeof(metrics));
     metrics.vad_floor_rms = config->vad_floor_rms;
     memset(&ipc, 0, sizeof(ipc));
+    ipc.intercom_fd = -1;
+    ipc.intercom_profile = echo2_intercom_profile("/etc/libreecho/target");
     le_clap_detector_init(&ipc.clap);
     le_smoke_alarm_detector_init(&ipc.smoke_alarm);
     ipc.listen_fd = -1;
@@ -1029,7 +1119,7 @@ static int run_waked(const struct waked_config *config)
             wake_near_miss_received, NULL) < 0)
         goto out;
 #endif
-    microphone_fd = connect_mic_stream(config->mic_socket);
+    microphone_fd = connect_mic_stream(config->mic_socket, &aec_headroom);
     if (microphone_fd < 0) {
         perror("waked: microphone stream");
         goto out;
@@ -1090,7 +1180,7 @@ static int run_waked(const struct waked_config *config)
         le_voice_aec_guard_status(
             &aec_guard, &reference,
             le_voice_reference_active(&reference, monotonic_nanoseconds(),
-                                      REFERENCE_TIMEOUT_NS),
+                                      LE_VOICE_REFERENCE_TAIL_NS),
             metrics.aec_frames, monotonic_nanoseconds(), 0);
         if (descriptors[3].revents & POLLIN) {
             struct le_wake_event event;
@@ -1136,6 +1226,7 @@ static int run_waked(const struct waked_config *config)
                 microphone_used -= frame_bytes;
                 frame_result = process_frame(
                     &aec, &aec_guard, &reference, &vad, &wake_worker, &ipc, microphone,
+                    aec_headroom,
                     preroll, &preroll_position, dump_fd, dump_limit,
                     &metrics);
                 if (frame_result < 0)
@@ -1189,7 +1280,7 @@ out:
     }
     for (i = 0; i < MAX_AUDIO_SUBSCRIBERS; ++i) {
         if (ipc.audio_subscribers[i] >= 0)
-            close(ipc.audio_subscribers[i]);
+            close_audio_subscriber(&ipc, i);
     }
     if (ipc.event_pipe[0] >= 0)
         close(ipc.event_pipe[0]);

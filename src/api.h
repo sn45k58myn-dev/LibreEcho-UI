@@ -76,6 +76,7 @@ struct le_peer_key peer_key;char peer_key_path[512];int peer_key_loaded;
    reads it from the saved config and needs the pairing key as well. */
 int nearest_answers;/* Replay cache for group commands (#448). */struct le_peer_replay peer_replay;/* Device groups (#448), kept in peer-groups beside the config file. */struct le_group_set groups;char groups_path[512];int groups_loaded;};
 int api_request_authorize(struct api_context*,const struct api_request*,struct api_response*);
+int api_home_assistant_selected(struct api_context*);
 int api_bootstrap_required(const struct api_context*);
 void api_set_https_active(struct api_context*,int);
 /* Once-a-second upkeep of this device's _libreecho._tcp advertisement. Never

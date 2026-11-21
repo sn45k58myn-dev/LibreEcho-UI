@@ -376,8 +376,10 @@ int main(void)
          */
         struct sockaddr_un address;
         const char request[] =
-            "{\"v\":1,\"id\":34,\"cmd\":\"stream_mono\",\"args\":{}}\n";
+            "{\"v\":1,\"id\":34,\"cmd\":\"stream_mono\","
+            "\"args\":{\"aec_headroom\":true}}\n";
         char sink[4096];
+        size_t header_bytes = 0;
         double doa = -1.0;
         int running_seen = 0;
         FILE *file;
@@ -409,6 +411,14 @@ int main(void)
                       sizeof(address)) == 0);
         CHECK(write(stream_fd, request, sizeof(request) - 1) ==
               (ssize_t)(sizeof(request) - 1));
+        while (header_bytes + 1 < sizeof(response)) {
+            CHECK(read(stream_fd, response + header_bytes, 1) == 1);
+            if (response[header_bytes++] == '\n')
+                break;
+        }
+        response[header_bytes] = '\0';
+        CHECK(strstr(response, "\"ok\":true") != NULL);
+        CHECK(strstr(response, "\"aec_headroom\":true") != NULL);
         for (i = 0; i < 200; ++i) {
             struct pollfd descriptor = {stream_fd, POLLIN, 0};
             const char *field;

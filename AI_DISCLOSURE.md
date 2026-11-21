@@ -13,17 +13,11 @@ explanations. Passing tests does not remove those possibilities.
 
 ## What has been demonstrated
 
-The personal `0.15.0` Echo 2 candidate was built from recorded source commits.
-Its evidence records passing source tests, supplemental checks, independent
-image verification, signature checks and local-file installer validation.
-The candidate's status is **`PREPARED_NOT_FLASHED`**.
-
-Those checks establish the outcomes named in their reports. They do not
-establish a successful boot on a physical Echo, audible playback, microphone
-quality, wake-word accuracy, electrical safety, recovery success, or reliable
-operation in a home. AI review is not independent human hardware validation.
-Do not describe the candidate as hardware-tested, production-ready or safe
-for every device based on these reports.
+For community release `0.16.8`, host tests exercised the call filter and the
+intercom's browser and native audio paths. A signed build ran on one
+full-size Echo 2 (2017). A tester heard less echo on an iPhone during a
+normal two-way call. Hardware and room conditions differ. The test covers
+one device and call setup. See the [product's verification record](https://github.com/sn45k58myn-dev/LibreEcho/blob/docs/community-publication/docs/community/0.16.8.md).
 
 A known radio startup/pause race remains: pausing before the first PCM output
 can stop a child before its parent-death guard is armed. The established

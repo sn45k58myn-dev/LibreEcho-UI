@@ -30,12 +30,13 @@ NEVER_ALONE = {"waked": "capture", "micd": "capture"}
 # the status path for a normal turn. The watchdog uses their pidfiles instead
 # so a long recognition, synthesis, or provider response is not mistaken for
 # a hung service and restarted mid-turn.
-PIDFILE_WHILE_BUSY = {"agentd", "ttsd", "sttd"}
+# Intercomd exposes a single-flight audio protocol rather than status RPC.
+PIDFILE_WHILE_BUSY = {"agentd", "ttsd", "sttd", "intercomd"}
 
 # Voice ownership. The API stops one set and starts the other on a mode
 # switch; an owner missing here makes the watchdog undo that switch.
 VOICE_OWNER = {"agentd": "OWNER_LOCAL", "ttsd": "OWNER_ANY",
-               "sttd": "OWNER_LOCAL", "esphomed": "OWNER_HA"}
+               "sttd": "OWNER_LOCAL", "esphomed": "OWNER_HA", "intercomd": "OWNER_HA"}
 
 # Daemons with no init script of their own, or deliberately not supervised.
 NOT_SUPERVISED = {

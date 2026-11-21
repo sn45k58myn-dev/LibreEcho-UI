@@ -10,6 +10,7 @@
 #include "mdns_client.h"
 #include "voice_ns.h"
 #include "adapter.h"
+#include "../intercom_protocol.h"
 #include "../config_store.h"
 #include "../json.h"
 #include "../esphome_health.h"
@@ -105,6 +106,17 @@
 #define NELEM(a) (sizeof(a)/sizeof((a)[0]))
 struct client { int fd,mode,phase,hello,states,closing,light,led_light,text_speech,level;unsigned char rx[RX_CAP],tx[TX_CAP];size_t rx_n,tx_n,tx_sent;uint64_t deadline,last_seen,ping_at,time_at;struct en_session noise; };
 struct io {int fd,stage,kind;char tx[2048],rx[4096];size_t tx_n,tx_sent,rx_n;uint64_t deadline;int target;};
+enum assist_reply_mark {
+ ASSIST_SPEECH_SEEN=1,
+ ASSIST_SPEECH_END=2,
+ ASSIST_TTS_START=4,
+ ASSIST_PLAYBACK_STARTED=8,
+ ASSIST_FIRST_PCM=16
+};
+struct assist_reply_timing {
+ uint64_t speech_end_at,tts_start_at,first_pcm_at;
+ unsigned observed,underruns;
+};
 struct state {
  struct client clients[CLIENTS];struct io jobs[JOBS],wake,mic,timer_cleanup;
  const char *config_path,*status_path,*control_path,*audio_path,*wake_path,*radio_path,*timer_path,*led_path,*mdns_path,*bus_path,*privacy_path,*ca_path,*idme_path;
@@ -128,6 +140,7 @@ struct state {
  int voice_chimes,voice_chime_started;
  char conversation[128],tts_url[1024],next_url[1024],result[24];int continue_turn,run_end,early_tts,playing,announcement,pipeline,tts_done,timer_pending;
  time_t result_time;struct esp_playback playback;int mdns_fd;
+ struct assist_reply_timing assist_reply,last_assist_reply;
  char process_start[32],boot_id[64],listener_inode[32];unsigned listener_port;
  /* set_ring (#397): when its ledd overlay ends; 0 when none is running. */
  uint64_t action_ring_end;
@@ -174,12 +187,39 @@ static int send_msg(struct client *c,unsigned type,const void *p,size_t n){unsig
  z=ef_plain_encode(buf,sizeof buf,type,p,n);int rc=z?queued(c,buf,z):-1;if(rc)c->closing=1;return rc;
 }
 static int send_writer(struct client *c,unsigned t,struct ep_writer *w){return w->error?-1:send_msg(c,t,w->data,w->length);}
-static void status_write(void){char b[512],tmp[512];int connected=0,fd,n;for(unsigned i=0;i<CLIENTS;i++)if(S.clients[i].fd>=0&&S.clients[i].hello)connected=1;
- n=snprintf(b,sizeof b,"{\"pid\":%ld,\"start_time\":\"%s\",\"boot_id\":\"%s\",\"listener_inode\":\"%s\",\"port\":%u,\"ready\":%s,\"connected\":%s,\"in_progress\":%s,\"server_wake\":%s,\"server_wake_streaming\":%s,\"last_result\":\"%s\",\"last_result_time\":%lld}\n",(long)getpid(),S.process_start,S.boot_id,S.listener_inode,S.listener_port,S.ready?"true":"false",connected?"true":"false",S.turn?"true":"false",S.server_wake?"true":"false",S.server_turn&&S.turn==2?"true":"false",S.result,(long long)S.result_time);
+static void assist_delay_json(char value[24],const struct assist_reply_timing *timing,
+                              unsigned mark,uint64_t end){
+ unsigned required=ASSIST_SPEECH_END|mark;
+ if((timing->observed&required)==required&&end>=timing->speech_end_at)
+  snprintf(value,24,"%llu",(unsigned long long)(end-timing->speech_end_at));
+ else snprintf(value,24,"null");
+}
+static void status_write(void){
+ char b[512],tmp[512],assist[160]="null";
+ int connected=0,fd,n;
+ for(unsigned i=0;i<CLIENTS;i++)if(S.clients[i].fd>=0&&S.clients[i].hello)connected=1;
+
+ const struct assist_reply_timing *timing=&S.last_assist_reply;
+ if(timing->observed){
+  char tts[24],pcm[24],underruns[24]="null";
+  assist_delay_json(tts,timing,ASSIST_TTS_START,timing->tts_start_at);
+  assist_delay_json(pcm,timing,ASSIST_FIRST_PCM,timing->first_pcm_at);
+  if(timing->observed&ASSIST_PLAYBACK_STARTED)
+   snprintf(underruns,sizeof underruns,"%u",timing->underruns);
+  snprintf(assist,sizeof assist,"{\"tts_start_ms\":%s,\"first_pcm_ms\":%s,\"underruns\":%s}",tts,pcm,underruns);
+ }
+ n=snprintf(b,sizeof b,"{\"pid\":%ld,\"start_time\":\"%s\",\"boot_id\":\"%s\","
+            "\"listener_inode\":\"%s\",\"port\":%u,\"ready\":%s,\"connected\":%s,\"in_progress\":%s,"
+            "\"server_wake\":%s,\"server_wake_streaming\":%s,\"last_result\":\"%s\","
+            "\"last_result_time\":%lld,\"last_assist_reply\":%s}\n",
+            (long)getpid(),S.process_start,S.boot_id,S.listener_inode,S.listener_port,
+            S.ready?"true":"false",connected?"true":"false",S.turn?"true":"false",
+            S.server_wake?"true":"false",S.server_turn&&S.turn==2?"true":"false",
+            S.result,(long long)S.result_time,assist);
  if(n<0||(size_t)n>=sizeof b||snprintf(tmp,sizeof tmp,"%s.tmp",S.status_path)>=(int)sizeof tmp)return;
  fd=open(tmp,O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC|O_NOFOLLOW,0600);if(fd<0)return;if(write(fd,b,(size_t)n)==n){close(fd);if(rename(tmp,S.status_path))unlink(tmp);}else{close(fd);unlink(tmp);}
 }
-static int mic_muted(void){return S.local_mute_gate||S.muted||S.privacy!=0||!S.last_audio_status||S.now-S.last_audio_status>1500;}
+static int mic_muted(void){return le_ic_lease_active(LE_IC_LEASE,S.now)||S.local_mute_gate||S.muted||S.privacy!=0||!S.last_audio_status||S.now-S.last_audio_status>1500;}
 /* Turn indicators use ledd's owner-scoped pattern layer, never "animate":
  * animate persists the theme as the ring's saved colour and breathes until
  * another command replaces it, and nothing ever ended it -- a failed turn left
@@ -327,7 +367,21 @@ static int announce_done(int success){unsigned char b[4];struct ep_writer w={b,s
 static void capture_end(void){if(S.turn==2&&S.owner>=0){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,2,1);(void)send_writer(&S.clients[S.owner],106,&w);}if(S.turn==1||S.turn==2){S.turn=3;if(S.pipeline&&S.voice_chime_started)voice_chime(0);event_send(ACTIVITY_VOICE_KEY,"thinking");}profile("thinking");}
 /* Playback ends through turn_clear or the tick; report it once, when S.playing drops. */
 static void playback_stopped(void){if(!S.playing)return;S.playing=0;event_send(ACTIVITY_PLAYBACK_KEY,"stopped");}
-static void turn_clear(const char *result,int notify){int active=S.turn||S.playing,server=S.server_turn;if(notify)(void)announce_done(0);playback_stopped();esp_playback_close(&S.playback);S.playing=S.turn=S.continue_turn=S.run_end=S.early_tts=S.announcement=S.pipeline=S.tts_done=S.server_turn=0;S.voice_chime_started=0;
+static void assist_reply_finish(void){
+ struct assist_reply_timing *timing=&S.assist_reply;
+ if(S.pipeline&&timing->observed){
+  if(timing->observed&ASSIST_PLAYBACK_STARTED){
+   timing->underruns=S.playback.underruns;
+   if(S.playback.first_pcm_seen){
+    timing->first_pcm_at=S.playback.first_pcm_at;
+    timing->observed|=ASSIST_FIRST_PCM;
+   }
+  }
+  S.last_assist_reply=*timing;
+ }
+ memset(timing,0,sizeof *timing);
+}
+static void turn_clear(const char *result,int notify){int active=S.turn||S.playing,server=S.server_turn;if(notify)(void)announce_done(0);playback_stopped();assist_reply_finish();esp_playback_close(&S.playback);S.playing=S.turn=S.continue_turn=S.run_end=S.early_tts=S.announcement=S.pipeline=S.tts_done=S.server_turn=0;S.voice_chime_started=0;
  if(strcmp(result,"success"))for(unsigned i=0;i<JOBS;i++)if(S.jobs[i].kind==JOB_VOICE_CHIME&&!S.jobs[i].tx_sent)io_close(&S.jobs[i]);
  S.next_url[0]=S.tts_url[0]=S.conversation[0]=0;snprintf(S.result,sizeof S.result,"%s",result);S.result_time=time(NULL);
  /* A server-wake stream ends by timeout or HA error; retry after a second so a rejected run cannot spin. */
@@ -335,9 +389,11 @@ static void turn_clear(const char *result,int notify){int active=S.turn||S.playi
  /* One voice event per opened turn (wake, announcement or continued turn). */
  if(S.voice_open){S.voice_open=0;event_send(ACTIVITY_VOICE_KEY,strcmp(result,"success")?"stopped":"finished");}/* Error flash only for a turn that was really interrupted: an idle HA
  * reconnect is not a user-visible failure. */
- profile(active&&!server&&strcmp(result,"success")&&strcmp(result,"cancelled")?"error":"idle");status_write();all_states();}
+ profile(active&&!server&&strcmp(result,"success")&&strcmp(result,"cancelled")&&strcmp(result,"intercom")?"error":"idle");status_write();all_states();}
 static int voice_start(uint64_t sample,int continued);
 static void cancel_turn(const char *reason){if(S.turn&&S.owner>=0){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,1,0);(void)send_writer(&S.clients[S.owner],90,&w);}turn_clear(reason,S.announcement);}
+/* Both markers expire: a companion crash cannot permanently disable Assist. */
+static void intercom_tick(void){static uint64_t refreshed;int hold=le_ic_lease_active(LE_IC_LEASE,S.now);if(hold){if(S.turn)cancel_turn("intercom");if(S.now-refreshed>=250){refreshed=S.now;(void)le_ic_lease_write(LE_IC_ACK,S.now);}}else if(refreshed){refreshed=0;unlink(LE_IC_ACK);}}
 /* A request the user cancelled (#404) ends quietly: ring straight to idle, no
  * error flash, and the HA pipeline is told to stop so no reply follows. The
  * ESPHome voice events carry no run id, so a brief guard keeps a fresh wake
@@ -368,7 +424,7 @@ static int server_listen_start(void){unsigned char b[160];struct ep_writer w={b,
  from=S.ring_end>16000?S.ring_end-16000:0;if(from<S.ring_first)from=S.ring_first;S.capture_next=from;
  S.turn=1;S.server_turn=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=S.run_end=S.early_tts=S.tts_done=0;S.tts_url[0]=S.next_url[0]=0;S.announcement=0;S.pipeline=1;S.voice_chime_started=0;profile("listening");status_write();return 0;
 }
-static int playback_start(const char *url){if(!url[0]||S.playing)return -1;if(esp_playback_start(&S.playback,url,S.bus_path,S.ca_path,S.now)<0){esp_playback_close(&S.playback);return -1;}S.playing=1;S.turn=4;all_states();event_send(ACTIVITY_PLAYBACK_KEY,"started");return 0;}
+static int playback_start(const char *url){if(!url[0]||S.playing)return -1;if(esp_playback_start(&S.playback,url,S.bus_path,S.ca_path,S.now)<0){esp_playback_close(&S.playback);return -1;}if(S.pipeline)S.assist_reply.observed|=ASSIST_PLAYBACK_STARTED;S.playing=1;S.turn=4;all_states();event_send(ACTIVITY_PLAYBACK_KEY,"started");return 0;}
 /* HA may await the drain ack before RUN_END. Ack once, but keep this pipeline
  * alive until RUN_END so its delayed event cannot address a new capture. */
 static void completed(void){if(!S.tts_done)(void)announce_done(1);S.tts_done=1;if(S.pipeline&&!S.run_end)return;char conv[128];int cont=S.continue_turn;snprintf(conv,sizeof conv,"%s",S.conversation);turn_clear("success",0);if(cont&&!mic_muted()){snprintf(S.conversation,sizeof S.conversation,"%s",conv);(void)voice_start(S.ring_end,1);}}
@@ -422,6 +478,7 @@ static int svc_effect(const char *s){for(unsigned i=0;i<NELEM(led_effects);i++)i
 static int service_execute(const void *p,size_t n){struct svc_value v[3];unsigned count=0;unsigned key=(unsigned)ep_get_uint(p,n,1,0);
  char text[SERVICE_TEXT_MAX+1],escaped[2*SERVICE_TEXT_MAX+16],args[512];
  if(service_call(p,n,v,NELEM(v),&count))return -1;
+ if(le_ic_lease_active(LE_IC_LEASE,S.now))return 0;
  if(key==SERVICE_ANNOUNCE_KEY){if(count!=1||svc_text(&v[0],text,sizeof text)||!svc_plain_text(text))return -1;
   if(S.turn||S.playing)return 0;json_escape(escaped,sizeof escaped,text);snprintf(args,sizeof args,"{\"text\":\"%s\"}",escaped);return job(S.audio_path,"speak",args,0,0)?-1:0;}
  if(key==SERVICE_PLAY_SOUND_KEY){char name[SERVICE_NAME_MAX+2];if(count!=1||svc_text(&v[0],name,sizeof name)||!svc_sound_name(name))return -1;
@@ -498,6 +555,21 @@ static int provision(struct client *c,const void *p,size_t n){struct ep_reader r
  struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,1,ok);int rc=send_writer(c,125,&w);mbedtls_platform_zeroize(key,sizeof key);mbedtls_platform_zeroize(base64,sizeof base64);if(ok){/* current encrypted session can read its ack; all sessions reconnect */for(unsigned i=0;i<CLIENTS;i++)if(S.clients[i].fd>=0)S.clients[i].closing=1;}return rc;
 }
 static int event_data(const void *p,size_t n,const char *name,char *out,size_t cap){struct ep_reader r;struct ep_field f;unsigned count=0;ep_reader_init(&r,p,n);out[0]=0;while(ep_next(&r,&f)>0)if(f.number==2&&f.wire==2){char k[64],v[1024];if(++count>32||valid_proto(f.data,f.length)||ep_get_text(f.data,f.length,1,k,sizeof k)||ep_get_text(f.data,f.length,2,v,sizeof v))return -1;if(!strcmp(k,name)){if(strlen(v)>=cap)return -1;memcpy(out,v,strlen(v)+1);return 1;}}return r.error?-1:0;}
+/* The VAD end is the speech boundary; RUN_END and TTS fallback capture
+ * closure are too late to be useful timing anchors. */
+static void assist_reply_event(unsigned event){
+ struct assist_reply_timing *timing=&S.assist_reply;
+ if(!S.pipeline)return;
+ if(event==4||event==11)timing->observed|=ASSIST_SPEECH_SEEN;
+ if(event==12&&!(timing->observed&ASSIST_SPEECH_END)){
+  timing->speech_end_at=S.now;
+  timing->observed|=ASSIST_SPEECH_END;
+ }
+ if((event==7||(event==100&&S.early_tts))&&!(timing->observed&ASSIST_TTS_START)){
+  timing->tts_start_at=S.now;
+  timing->observed|=ASSIST_TTS_START;
+ }
+}
 static void voice_event(const void *p,size_t n){unsigned event=(unsigned)ep_get_uint(p,n,1,0);char v[1024];if(!S.turn)return;
  if(event_data(p,n,"url",v,sizeof v)<0){cancel_turn("bad_event");return;}if(v[0])snprintf(S.tts_url,sizeof S.tts_url,"%s",v);
  /* Speech text (#398): STT_END carries the transcript, TTS_START the reply text. Published only with the owner setting. */
@@ -505,6 +577,7 @@ static void voice_event(const void *p,size_t n){unsigned event=(unsigned)ep_get_
  if(event==0){cancel_turn("ha_error");return;}if(event==10&&S.server_turn&&(S.turn==1||S.turn==2))voice_chime_start();if(event==12||(S.voice_chimes&&event==4))capture_end();
  if(event==6){if(event_data(p,n,"conversation_id",S.conversation,sizeof S.conversation)<0){cancel_turn("bad_event");return;}if(event_data(p,n,"continue_conversation",v,sizeof v)<0){cancel_turn("bad_event");return;}S.continue_turn=!strcmp(v,"1");}
  if(event==100){if(event_data(p,n,"tts_start_streaming",v,sizeof v)<0){cancel_turn("bad_event");return;}S.early_tts=!strcmp(v,"1");}
+ assist_reply_event(event);
  if((event==100&&S.early_tts)||event==8){capture_end();if(!S.playing&&!S.tts_done&&S.tts_url[0]){event_send(ACTIVITY_VOICE_KEY,"replying");if(playback_start(S.tts_url)<0){(void)announce_done(0);cancel_turn("playback_error");return;}}}
  /* RUN_START reserves a TTS URL even when the intent produces no speech.
   * Only actual playback must drain before RUN_END can finish the turn. */
@@ -568,7 +641,7 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  case 91:if(S.owner!=(int)idx||S.turn!=1)return 0;if(ep_get_uint(p,n,2,0)||ep_get_uint(p,n,1,0)){cancel_turn("ha_rejected");return 0;}S.turn=2;if(S.server_turn)status_write();return 0;
  case 92:if(S.owner==(int)idx)voice_event(p,n);return 0;
  case 119:if(S.owner!=(int)idx)return -1;if(S.turn){(void)announce_done(0);return 0;}
- if(dnd_on()){(void)announce_done(1);return 0;}
+ if(dnd_on()||le_ic_lease_active(LE_IC_LEASE,S.now)){(void)announce_done(1);return 0;}
  if(ep_get_text(p,n,1,url,sizeof url)||ep_get_text(p,n,3,S.next_url,sizeof S.next_url))return -1;S.turn=3;S.announcement=1;S.voice_open=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=!!ep_get_uint(p,n,4,0);snprintf(S.tts_url,sizeof S.tts_url,"%s",url);
  /* Field 3 is HA's preannounce chime (an ffmpeg_proxy WAV), field 1 the announcement: the chime plays first while
   * next_url holds the announcement. A chime that cannot play is skipped, never the announcement. */
@@ -746,6 +819,7 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  while(running){struct pollfd fds[2+CLIENTS];fds[0]=(struct pollfd){listener,POLLIN,0};for(unsigned i=0;i<CLIENTS;i++)fds[i+1]=(struct pollfd){S.clients[i].fd,(short)(POLLIN|(S.clients[i].tx_n?POLLOUT:0)),0};fds[1+CLIENTS]=(struct pollfd){S.button_fd,POLLIN,0};int ready=poll(fds,2+CLIENTS,10);S.now=now_ms();if(ready<0&&errno!=EINTR)break;
  if(reload_config){reload_config=0;for(unsigned i=0;i<CLIENTS;i++)client_close(i);if(load_configuration())break;}
  if(fds[0].revents&POLLIN){for(unsigned n=0;n<4;n++){int fd=accept(listener,NULL,NULL);if(fd<0)break;int flags=fcntl(fd,F_GETFL,0);if(flags<0||fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0){close(fd);continue;}unsigned idx;for(idx=0;idx<CLIENTS;idx++)if(S.clients[idx].fd<0)break;if(idx==CLIENTS){close(fd);continue;}struct client *c=&S.clients[idx];memset(c,0,sizeof *c);c->fd=fd;c->mode=-1;c->deadline=S.now+15000;c->last_seen=S.now;en_init(&c->noise);}}
+ intercom_tick();
  for(unsigned i=0;i<CLIENTS;i++)client_tick(i,fds[i+1].revents);
  if(S.button_fd>=0&&(fds[1+CLIENTS].revents&POLLIN))button_tick();
  if(S.now>=S.settings_poll+SETTINGS_POLL_MS){S.settings_poll=S.now;(void)job(S.led_path,"status","{}",10,0);(void)job(S.wake_path,"status","{}",11,0);(void)job(S.agent_path,"voice_history_generation","{}",HISTORY_GENERATION_KIND,0);}

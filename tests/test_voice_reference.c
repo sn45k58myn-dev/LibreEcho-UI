@@ -26,7 +26,8 @@ struct test_packet {
     int16_t samples[LE_VOICE_REFERENCE_MAX_PACKET_FRAMES];
 };
 
-static int send_packet(int fd, const char *path, uint32_t sequence)
+static int send_packet(int fd, const char *path, uint32_t sequence,
+                       uint64_t stamp, uint32_t activity, int16_t amplitude)
 {
     struct sockaddr_un address;
     struct test_packet packet;
@@ -41,10 +42,10 @@ static int send_packet(int fd, const char *path, uint32_t sequence)
     packet.header.sample_rate = LE_VOICE_REFERENCE_INPUT_RATE;
     packet.header.channels = 1;
     packet.header.frames = LE_VOICE_REFERENCE_MAX_PACKET_FRAMES;
-    packet.header.activity_mask = 1;
-    packet.header.monotonic_ns = 1000000000ULL;
+    packet.header.activity_mask = activity;
+    packet.header.monotonic_ns = stamp;
     for (i = 0; i < packet.header.frames; ++i)
-        packet.samples[i] = (int16_t)((i % 200U) - 100);
+        packet.samples[i] = amplitude;
     memset(&address, 0, sizeof(address));
     address.sun_family = AF_UNIX;
     strcpy(address.sun_path, path);
@@ -74,7 +75,7 @@ int main(void)
     CHECK(le_voice_reference_open(&reference, path) == 0);
     sender = socket(AF_UNIX, SOCK_DGRAM, 0);
     CHECK(sender >= 0);
-    CHECK(send_packet(sender, path, 0) == 0);
+    CHECK(send_packet(sender, path, 0, 1000000000ULL, 1, -1200) == 0);
     CHECK(le_voice_reference_drain(&reference) == 1);
     CHECK(reference.packets == 1);
     CHECK(reference.count >= 680 && reference.count <= 683);
@@ -87,14 +88,36 @@ int main(void)
     CHECK(reference.count == before - 160);
     CHECK(reference.underflows == 0);
 
-    CHECK(send_packet(sender, path, 2) == 0);
+    CHECK(send_packet(sender, path, 2, 1043000000ULL, 1, -1200) == 0);
     CHECK(le_voice_reference_drain(&reference) == 1);
     CHECK(reference.discontinuities == 1);
     CHECK(reference.count >= 680 && reference.count <= 683);
+    /* A genuine idle gap with sequential packet numbers: an unread loud
+     * period from the old run cannot be returned for the new onset. */
+    CHECK(send_packet(sender, path, 3, 2000000000ULL, 1, 1200) == 0);
+    CHECK(send_packet(sender, path, 4, 2043000000ULL, 0, 0) == 0);
+    CHECK(le_voice_reference_drain(&reference) == 2);
+    CHECK(reference.edge_clears == 2);
+    CHECK(reference.discontinuities == 1);
+    CHECK(le_voice_reference_active(&reference, 2044000000ULL,
+                                    LE_VOICE_REFERENCE_TAIL_NS));
+    CHECK(reference.count >= 1364 && reference.count <= 1366);
+    le_voice_reference_read(&reference, output, 640);
+    CHECK(output[320] > 1150 && output[320] < 1250);
+    le_voice_reference_read(&reference, output, 640);
+    CHECK(output[320] >= -5 && output[320] <= 5);
     le_voice_reference_read(&reference, output, reference.count);
     le_voice_reference_read(&reference, output, 160);
     CHECK(reference.underflows == 1);
-    puts("voice_reference: 48-to-16 kHz ring and discontinuity handling ok");
+    /* Padding must never extend the tail beyond the last active period. */
+    CHECK(send_packet(sender, path, 5, 2249000000ULL, 0, 0) == 0);
+    CHECK(send_packet(sender, path, 6, 2260000000ULL, 0, 0) == 0);
+    CHECK(le_voice_reference_drain(&reference) == 2);
+    CHECK(!le_voice_reference_active(&reference, 2260000000ULL,
+                                     LE_VOICE_REFERENCE_TAIL_NS));
+    CHECK(reference.count == 0);
+    CHECK(reference.edge_clears == 2 && reference.discontinuities == 1);
+    puts("voice_reference: resampling, fresh onsets, bounded tails and gaps ok");
 
 out:
     if (sender >= 0)

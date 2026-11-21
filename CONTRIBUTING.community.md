@@ -48,11 +48,9 @@ image/installer validation, or an observation on named physical hardware.
 Include device model, board revision, build identity, test conditions and
 redacted logs for hardware claims.
 
-The existing personal `0.15.0` Echo 2 candidate is
-**`PREPARED_NOT_FLASHED`**. Its passing automated checks do not establish
-physical boot, audio, privacy controls, wake-word pickup or recovery. The
-remaining early radio pause/parent-death race is not fixed merely because the
-established-playback test passes.
+Release `0.16.8` was exercised on one full-size Echo 2 in a two-way iPhone
+call. Report your own hardware and observed results when testing a different
+board or build. The [release notes](https://github.com/sn45k58myn-dev/LibreEcho/blob/docs/community-publication/docs/community/0.16.8.md) describe the scope of the tests.
 
 Documentation-only publication commits may sit above the source commits used
 to build a candidate. Preserve and identify those frozen build inputs; do

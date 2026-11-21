@@ -4,16 +4,64 @@
 #include "sdk_player_listener.h"
 #include "sendspin_engine_fixture.h"
 #include <sendspin/client.h>
+#include <poll.h>
 #include <vector>
 using namespace libreecho::sendspin;
 using namespace libreecho::sendspin::test;
+// Linker wrapper only in this test binary. It resumes the real engine exactly
+// when the old feedback pump starts its second wait (progress after a timed-out
+// re-arm), eliminating a scheduler-dependent sleep from the regression.
+static thread_local EngineServer* resume_on_second_wait=nullptr;
+static thread_local unsigned rearm_read_waits=0;
+extern "C" int __real_poll(struct pollfd*,nfds_t,int);
+extern "C" int __wrap_poll(struct pollfd* fds,nfds_t count,int timeout) {
+    if(resume_on_second_wait && count==1 && (fds[0].events&POLLIN) && ++rearm_read_waits==2) {
+        resume_on_second_wait->resume();
+        resume_on_second_wait=nullptr;
+    }
+    return __real_poll(fds,count,timeout);
+}
 static uint32_t queued(EngineServer& server) {
     uint32_t n = 0;
     server.with_sink([&](le_audio_sink* s) { le_audio_sink_progress p{};
         CHECK(le_audio_sink_get_progress(s, &p) == LE_AUDIO_SINK_OK, "progress"); n=p.queued_frames; });
     return n;
 }
+static void delayed_rearm_in_actual_feedback_pump() {
+    EngineServer server; const auto path=unique_socket_path("slow-life");
+    CHECK(server.start(path),"delayed feedback real sink start");
+    EngineSinkSessionConfig cfg; cfg.socket_path=path;
+    EngineSinkSession session(cfg);
+    ::sendspin::SendspinClientConfig client_cfg;
+    ::sendspin::SendspinClient client(client_cfg);
+    ::sendspin::PlayerRoleConfig player_cfg;
+    player_cfg.audio_formats.push_back({::sendspin::SendspinCodecFormat::PCM,2,48000,16});
+    auto& player=client.add_player(player_cfg);
+    SdkPlayerListener listener(session,&player);
+    std::vector<int16_t> pcm(128*2,123);
+    auto offer=[&](){return listener.on_audio_write(reinterpret_cast<uint8_t*>(pcm.data()),pcm.size()*2,20);};
+    listener.on_stream_start(); CHECK(offer()==pcm.size()*2,"delayed feedback initial audio");
+    const auto generation=session.generation();
+    server.with_sink([&](le_audio_sink* s){(void)le_audio_sink_cancel(s,server.epoch(),generation);});
+    CHECK(offer()==0 && session.rearm_pending(),"delayed feedback generation lost");
+    server.pause();
+    // The first OPEN wait expires. Only the faulty old-generation progress
+    // poll reaches the wrapper's second wait and steals the successor ACK.
+    rearm_read_waits=0;
+    resume_on_second_wait=&server;
+    listener.pump_feedback();
+    resume_on_second_wait=nullptr;
+    server.resume();
+    CHECK(rearm_read_waits==1,"lost feedback performs only the bounded OPEN wait");
+    for(int i=0;i<8 && !session.streaming();++i) listener.pump_feedback();
+    CHECK(session.streaming() && session.generation()==generation+1,
+          "actual feedback pump adopts delayed re-arm without another stream/start");
+    CHECK(listener.stream_starts()==1,"delayed re-arm does not fabricate an SDK stream start");
+    CHECK(offer()==pcm.size()*2,"actual feedback pump restores credited audio");
+    session.disconnect(); server.stop();
+}
 int main() {
+    delayed_rearm_in_actual_feedback_pump();
     EngineServer server;
     auto path = unique_socket_path("life");
     CHECK(server.start(path), "real sink start");

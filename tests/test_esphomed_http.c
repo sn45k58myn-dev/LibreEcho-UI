@@ -91,6 +91,18 @@ static void streams_before_eof(void){static unsigned char b[44+48000*4];size_t n
  allow_all(1);assert(run(6000)==1);assert(p.input_frames==48000*2&&p.audio_frames==48000*2&&bus_size()==p.audio_frames*4);end_fetch();
  printf("Streaming: %zu bytes on the bus with 1/8 of the body received: OK\n",early);
 }
+static void first_pcm_timing(void){static unsigned char b[44+48000*4];size_t n=tone(b,48000*2,1200,1);
+ const char *header="HTTP/1.1 200 OK\r\n\r\n";
+ memset(b+44,0,48000*2);
+ bus_reset();resp_reset();resp_text(header);resp_add(b,n);fetch(bus);
+ allow(strlen(header)+44+48000*2);
+ for(unsigned i=0;i<60;i++)assert(tick()==0);
+ assert(p.audio_frames>0&&!p.first_pcm_seen);
+ allow_all(1);for(unsigned i=0;i<300&&!p.first_pcm_seen;i++)assert(tick()==0);
+ assert(p.first_pcm_seen&&p.first_pcm_at==now_ms-10);uint64_t first=p.first_pcm_at;
+ assert(run(1000)==1&&p.first_pcm_at==first);end_fetch();
+ puts("First reply PCM timing ignores decoded silence and is kept through drain: OK");
+}
 /* Longer than the old 2 MiB cache and slower than the old 15 s fetch deadline. */
 static void long_and_slow(void){static unsigned char b[44+48000*2*36];size_t n=tone(b,48000*36,700,1);assert(n>2U*1024U*1024U);
  bus_reset();resp_reset();resp_text("HTTP/1.1 200 OK\r\n\r\n");resp_add(b,n);allow_all(1);fetch(bus);assert(run(6000)==1);assert(p.input_frames==48000*36&&bus_size()==p.audio_frames*4);end_fetch();
@@ -133,7 +145,7 @@ static void warm_before_reply(void){static unsigned char b[44+48000*2];size_t n=
  int fd=p.bus_fd;size_t thinking=heard_n;assert(fd>=0&&p.fifo&&!p.state&&thinking>=48000*4*(450+SILENCE_LEAD_MS)/1000&&thinking<=48000*4*(600+SILENCE_LEAD_MS)/1000&&first_sound()==heard_n);
  assert(esp_playback_start(&p,url,fifo,NULL,now_ms)==0);assert(p.bus_fd==fd);for(unsigned i=0;i<20;i++)assert(tick()==0);
  /* Real time continues across the hand-over: no second lead, no burst. */
- assert(heard_n-thinking>=48000*4*180/1000&&heard_n-thinking<=48000*4*230/1000&&first_sound()==heard_n);
+ assert(heard_n-thinking>=48000*4*180/1000&&heard_n-thinking<=48000*4*230/1000&&first_sound()==heard_n&&!p.first_pcm_seen);
  answer(server);resp_text("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");resp_chunked(b,n,9600);resp_text("0\r\n\r\n");allow_all(1);
  assert(run(1000)==1);assert(sound_bytes()==p.audio_frames*4&&p.audio_frames==48000&&first_sound()>thinking&&heard_n%4==0);end_fetch();bus_fifo_close();
  puts("Warm while thinking, reply continues on the warmed FIFO; regular files stay cold: OK");
@@ -191,6 +203,6 @@ int main(int argc,char **argv){
  /* Run the untouched external capture first so RED identifies the real bug. */
  if(argc==2)ffmpeg_wav(argv[1]);else assert(argc==1);
  wav_boundaries();unsigned char b[52];wav_header(b,sizeof b);put32(b+4,UINT32_MAX);put32(b+40,UINT32_MAX);http_boundaries(b,sizeof b);
- streams_before_eof();long_and_slow();warm_fifo();warm_before_reply();preroll_fifo();stall_reconnect();
+ streams_before_eof();first_pcm_timing();long_and_slow();warm_fifo();warm_before_reply();preroll_fifo();stall_reconnect();
  assert(unlink(bus)==0);return 0;
 }

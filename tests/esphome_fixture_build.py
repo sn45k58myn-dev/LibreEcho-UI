@@ -22,7 +22,7 @@ def daemon_binary(directory):
                "esphome_ble_proxy", "radio_resample", "mdns_client", "mdns_lease", "voice_ns"]
     command = [os.environ.get("CC", "cc"), "-std=c99", "-D_POSIX_C_SOURCE=200809L", "-O1",
                "-Wall", "-Wextra", "-Werror", "-Wno-misleading-indentation", "-I" + str(tls / "include")]
-    command += ["src/adapter/" + source + ".c" for source in sources] + ["src/config_store.c", "src/json.c"]
+    command += ["src/adapter/" + source + ".c" for source in sources] + ["src/intercom_protocol.c", "src/config_store.c", "src/json.c"]
     command += [str(tls / "lib" / ("lib" + name + ".a")) for name in ("mbedtls", "mbedx509", "mbedcrypto")]
     subprocess.run(command + ["-lm", "-o", str(binary)], cwd=ROOT, check=True, timeout=60)
     return binary

@@ -130,6 +130,41 @@ void test_progress_poll_notices_drop_without_writes() {
     server.stop();
 }
 
+// The SDK feedback pump attempts re-arm and then polls progress. A successor
+// OPEN can outlive one bounded control operation while the engine is busy with
+// PCM/voice work. Progress for the lost predecessor must not consume that late
+// OPEN_ACK, or every later retry waits for an acknowledgement already discarded.
+void test_progress_during_pending_rearm_preserves_open_ack() {
+    std::string path = unique_socket_path("rearm");
+    EngineServer server;
+    CHECK(server.start(path), "server start");
+
+    EngineSinkSession s(make_config(path));
+    CHECK(s.start_stream() == SinkResult::Ok, "start gen1");
+    const uint32_t gen1 = s.generation();
+    CHECK(write_frames(s, 256, 1000) == 256 * kBytesPerFrame,
+          "gen1 audio accepted");
+    engine_drops_generation(server, gen1);
+    CHECK(write_frames(s, 128, 500) == 0u, "dropped generation accepts nothing");
+    CHECK(s.state() == SessionState::Lost, "predecessor is lost");
+
+    server.pause();
+    CHECK(s.rearm_stream() == SinkResult::Timeout,
+          "successor OPEN remains in flight while engine is busy");
+    server.resume();
+    EngineSinkTiming timing{};
+    CHECK(s.poll(&timing) == SinkResult::NotOpen,
+          "lost generation cannot poll or consume the pending OPEN reply");
+    CHECK(rearm_until_settled(s, 8) == SinkResult::Ok,
+          "next re-arm adopts the late successor OPEN_ACK");
+    CHECK(s.generation() > gen1 && s.streaming(), "successor is streaming");
+    CHECK(write_frames(s, 128, 1000) == 128 * kBytesPerFrame,
+          "audio flows after the delayed re-arm");
+
+    s.disconnect();
+    server.stop();
+}
+
 void test_rearm_attempts_are_bounded_when_engine_is_gone() {
     std::string path = unique_socket_path("rearm");
     EngineServer server;
@@ -391,6 +426,95 @@ uint32_t geometry_after_two_stale(uint32_t gen) {
 
 uint32_t always_stale(uint32_t) { return LE_AUDIO_SINK_ERR_STALE_GENERATION; }
 
+// An engine stalled behind voice/PCM work can have replies to earlier
+// PROGRESS_REQs ahead of the successor OPEN_ACK. ERROR names the engine's
+// current generation, not the rejected request's, so its opcode is essential.
+// A bounded drain is retryable; valid old replies are not malformed input and
+// must not spend the re-arm refusal budget or trigger generation probing.
+void test_old_progress_errors_do_not_reject_pending_open() {
+    std::string path = unique_socket_path("reply");
+    OpenScript script;
+    RawPeer peer;
+    CHECK(peer.start(path, [&](int fd) {
+        uint8_t request[2048];
+        for (;;) {
+            const ssize_t n = raw_recv(fd, request, sizeof(request));
+            if (n < static_cast<ssize_t>(LE_AUDIO_SINK_HEADER_BYTES + 8)) return;
+            const uint32_t gen = le_audio_sink_get_u32(
+                request + LE_AUDIO_SINK_HEADER_BYTES + 4);
+            { std::lock_guard<std::mutex> g(script.mu); script.seen.push_back(gen); }
+            if (gen == 2u) {
+                uint8_t error[LE_AUDIO_SINK_HEADER_BYTES + LE_AUDIO_SINK_ERROR_PAYLOAD_BYTES]{};
+                le_audio_sink_encode_header(error, LE_AUDIO_SINK_TYPE_ERROR,
+                                            LE_AUDIO_SINK_ERROR_PAYLOAD_BYTES);
+                uint8_t* p = error + LE_AUDIO_SINK_HEADER_BYTES;
+                le_audio_sink_put_u32(p, LE_AUDIO_SINK_ERR_STALE_GENERATION);
+                le_audio_sink_put_u32(p + 4, 0x1234u);
+                le_audio_sink_put_u32(p + 8, gen);
+                le_audio_sink_put_u32(p + 12, LE_AUDIO_SINK_TYPE_PROGRESS_REQ);
+                for (int i = 0; i < 12; ++i) raw_send(fd, error, sizeof(error));
+            }
+            uint8_t ack[LE_AUDIO_SINK_HEADER_BYTES + LE_AUDIO_SINK_OPEN_ACK_PAYLOAD_BYTES]{};
+            le_audio_sink_encode_header(ack, LE_AUDIO_SINK_TYPE_OPEN_ACK,
+                                        LE_AUDIO_SINK_OPEN_ACK_PAYLOAD_BYTES);
+            uint8_t* p = ack + LE_AUDIO_SINK_HEADER_BYTES;
+            le_audio_sink_put_u32(p + 4, 0x1234u);
+            le_audio_sink_put_u32(p + 8, gen);
+            le_audio_sink_put_u32(p + 12, LE_AUDIO_SINK_OUTPUT_RATE);
+            le_audio_sink_put_u16(p + 16, LE_AUDIO_SINK_OUTPUT_CHANNELS);
+            le_audio_sink_put_u16(p + 18, LE_AUDIO_SINK_FORMAT_S16_LE);
+            le_audio_sink_put_u32(p + 28, LE_AUDIO_SINK_OPEN_READY);
+            raw_send(fd, ack, sizeof(ack));
+        }
+    }), "queued progress peer start");
+    EngineSinkSession s(make_config(path));
+    CHECK(s.start_stream() == SinkResult::Ok, "queued progress gen1 start");
+    s.request_rearm("queued progress replies");
+    const SinkResult first = s.rearm_stream();
+    CHECK(first == SinkResult::Timeout,
+          "bounded drain of old progress errors is a retryable timeout");
+    CHECK(s.rearm_pending(), "old replies do not exhaust the refusal budget");
+    CHECK(rearm_until_settled(s, 8) == SinkResult::Ok,
+          "late OPEN_ACK survives bounded drains of old progress errors");
+    CHECK(s.generation() == 2u && s.streaming(),
+          "old progress errors do not falsely reject the accepted successor");
+    const auto seen = script.snapshot();
+    CHECK(seen.size() == 2u && seen[0] == 1u && seen[1] == 2u,
+          "no duplicate OPEN or stale-generation probing for unrelated errors");
+    s.disconnect();
+    peer.stop();
+}
+
+void test_open_does_not_ignore_unknown_or_malformed_replies() {
+    for (int variant = 0; variant < 2; ++variant) {
+        std::string path = unique_socket_path("invalid");
+        RawPeer peer;
+        CHECK(peer.start(path, [&](int fd) {
+            uint8_t request[2048];
+            if (raw_recv(fd, request, sizeof(request)) <= 0) return;
+            uint8_t reply[LE_AUDIO_SINK_HEADER_BYTES + LE_AUDIO_SINK_ERROR_PAYLOAD_BYTES]{};
+            if (variant == 0) {
+                le_audio_sink_encode_header(reply, LE_AUDIO_SINK_TYPE_ERROR,
+                                            LE_AUDIO_SINK_ERROR_PAYLOAD_BYTES);
+                le_audio_sink_put_u32(reply + LE_AUDIO_SINK_HEADER_BYTES,
+                                      LE_AUDIO_SINK_ERR_GEOMETRY);
+                le_audio_sink_put_u32(reply + LE_AUDIO_SINK_HEADER_BYTES + 12, 0xdead);
+                raw_send(fd, reply, sizeof(reply));
+            } else {
+                le_audio_sink_encode_header(reply, LE_AUDIO_SINK_TYPE_PROGRESS, 8);
+                raw_send(fd, reply, LE_AUDIO_SINK_HEADER_BYTES + 8);
+            }
+            (void)raw_recv(fd, request, sizeof(request));
+        }), "invalid reply peer start");
+        EngineSinkSession s(make_config(path));
+        CHECK(s.start_stream() == (variant == 0 ? SinkResult::Rejected : SinkResult::Malformed),
+              "unknown ERROR opcode or malformed progress cannot become a resumable old reply");
+        CHECK(!s.streaming(), "invalid replies cannot arm a generation");
+        s.disconnect();
+        peer.stop();
+    }
+}
+
 void test_non_stale_rejection_stops_probing() {
     std::string path = unique_socket_path("probe");
     OpenScript script;
@@ -453,6 +577,7 @@ int main() {
                  "test_sendspin_stream_recovery: engine drop and re-arm vs real engine\n");
     test_write_refusal_after_engine_drop_rearms();
     test_progress_poll_notices_drop_without_writes();
+    test_progress_during_pending_rearm_preserves_open_ack();
     test_rearm_attempts_are_bounded_when_engine_is_gone();
     test_stream_end_while_lost_does_not_rearm();
     test_changed_offer_with_pending_data_rearms();
@@ -463,6 +588,8 @@ int main() {
     test_non_stale_rejection_stops_probing();
     test_probe_bound_and_never_lose_ground();
     test_probe_bound_then_success_on_later_call();
+    test_old_progress_errors_do_not_reject_pending_open();
+    test_open_does_not_ignore_unknown_or_malformed_replies();
 
     if (libreecho::sendspin::test::g_failures != 0) {
         std::fprintf(stderr,

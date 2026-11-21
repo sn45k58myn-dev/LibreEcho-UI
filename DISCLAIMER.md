@@ -1,9 +1,9 @@
 # Experimental hardware and software disclaimer
 
 **This is an independent, experimental community fork. It includes
-AI-assisted additions. Use it at your own risk. The personal `0.15.0` Echo 2
-candidate is `PREPARED_NOT_FLASHED`; physical hardware acceptance has not been
-established.**
+AI-assisted additions. Use it at your own risk. The 0.16.8 intercom fix was
+tested on one full-size Echo 2 (2017). Other hardware, configurations and
+rooms may behave differently.**
 
 Read this document together with [AI_DISCLOSURE.md](AI_DISCLOSURE.md),
 [ATTRIBUTION.md](ATTRIBUTION.md), the applicable licenses, and the instructions
@@ -17,7 +17,7 @@ that a device will boot, work correctly, remain secure, or be recoverable.
 Hardware revisions, component differences, boot-chain versions and stock
 software can change the outcome.
 
-The current personal candidate is for the full-size Echo 2 target family
+The 0.16.8 build is for the full-size Echo 2 target family
 identified in its manifest. It is not evidence of this fork's hardware
 acceptance for an Echo Dot, Echo 3, Echo Studio or any other board. Research
 notes, proposed ports and roadmap entries are not compatibility approvals.

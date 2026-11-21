@@ -12,6 +12,7 @@ cleanup(){
     rm -rf "$SUITE_TMP"
 }
 trap cleanup EXIT INT TERM
+sh tests/test_intercom.sh
 PORT=${LIBREECHO_TEST_PORT:-18082}
 URL="http://127.0.0.1:$PORT"
 CFG=./build/test-suite-config.json
@@ -382,6 +383,8 @@ cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -std=c99 -Wall -Wextra -Wpedantic
 ./build/test-bt-media-resample
 make build/test-voice-aec build/test-voice-reference build/test-voice-aec-guard build/test-spoken-time build/test-timezone
 ./build/test-voice-aec
+make build/test-waked-intercom-aec
+./build/test-waked-intercom-aec
 # #401: noise suppressor, and the local pipeline's off/on contract.
 make build/test-voice-ns build/test-voice-pipeline-noise
 ./build/test-voice-ns

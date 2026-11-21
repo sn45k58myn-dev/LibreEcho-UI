@@ -111,6 +111,21 @@ The earlier fixed 4-sample delay-and-sum on lanes 0 and 3 was removed in
 0.14.4: the lanes arrive in step, so a fixed delay suited one source direction
 only and comb-filtered speech from every other direction.
 
+### Headroom during playback
+
+`waked` requests `stream_mono` with `{"aec_headroom":true}`. When `micd`
+acknowledges it, the digital gain stage leaves 6 dB of headroom in the PCM
+sent to the canceller. `waked` restores the gain on the outgoing stream
+before voice activity detection, wake-word scoring, Assist and intercom.
+It also restores the gain when playback is idle. The analog microphone gain,
+array selection and audio format are the same for both streams.
+
+The shared speaker mixer supplies the final 48 kHz reference, which `waked`
+filters and resamples to 16 kHz. Sendspin uses this reference too. Marking
+rendered Sendspin media active lets the existing canceller run when music is
+the only source. The digital headroom approach comes from
+[EchoMuse's echo reference work](https://github.com/wilbowes/EchoMuse/pull/975).
+
 ## Mix mode
 
 The owner picks how the speech microphones become the mono stream with

@@ -66,6 +66,8 @@
  * deliberately use their pidfiles to avoid interrupting an active turn. It is
  * a weaker check (it cannot tell a wedged process from a working one) but it
  * still catches the common failure, which is the process being gone.
+ * Intercomd's single-call PCM socket is not a status RPC; use its PID too,
+ * so a health probe cannot consume an audio connection or interrupt a call.
  */
 enum probe_kind {
     PROBE_SOCKET,
@@ -387,6 +389,8 @@ int main(int argc, char **argv)
          "/etc/init.d/libreecho-logd.init", 1, NULL, OWNER_ANY},
         {"esphomed", PROBE_PIDFILE, "/var/run/libreecho-esphomed.pid",
          "/etc/init.d/libreecho-esphomed.init", 1, NULL, OWNER_HA},
+        {"intercomd", PROBE_PIDFILE, "/var/run/libreecho-intercomd.pid",
+         "/etc/init.d/libreecho-intercomd.init", 1, NULL, OWNER_HA},
         {"waked", PROBE_SOCKET, "/run/libreecho/wakeword.sock",
          "/etc/init.d/libreecho-waked.init", 1, "capture", OWNER_ANY},
     };
@@ -471,8 +475,10 @@ int main(int argc, char **argv)
                     group = NULL;
             }
             custom_descs[custom].name = name;
-            custom_descs[custom].kind = PROBE_SOCKET;
-            custom_descs[custom].probe_path = sock;
+            /* Explicit PID probes let host fixtures exercise the same kind
+               as the shipped table without probing an audio-only socket. */
+            custom_descs[custom].kind = !strncmp(sock, "pidfile=", 8) ? PROBE_PIDFILE : PROBE_SOCKET;
+            custom_descs[custom].probe_path = sock + (custom_descs[custom].kind == PROBE_PIDFILE ? 8 : 0);
             custom_descs[custom].init_script = init;
             custom_descs[custom].restartable = *init ? 1 : 0;
             custom_descs[custom].group = group;

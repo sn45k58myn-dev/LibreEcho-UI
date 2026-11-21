@@ -19,7 +19,6 @@
  * behaviour is otherwise untouched: it never gates or delays the mic. */
 struct le_voice_aec_guard {
     char status_path[108];
-    int previous_active;
     unsigned int seen_discontinuities;
     unsigned int aec_resets;
     unsigned int edge_clears;
@@ -36,7 +35,6 @@ void le_voice_aec_guard_init(struct le_voice_aec_guard *guard,
 int le_voice_aec_guard_update(struct le_voice_aec_guard *guard,
                               struct le_voice_aec *aec,
                               struct le_voice_reference *reference,
-                              int reference_active,
                               uint64_t now_ns);
 /* Rewrites the status file when due (or when force is set). */
 void le_voice_aec_guard_status(struct le_voice_aec_guard *guard,

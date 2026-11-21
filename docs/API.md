@@ -3771,3 +3771,17 @@ frame only when the peak itself has playback activity and VAD. Quiet-room
 corroboration, acceptance threshold, sample attribution and lockout remain in
 force. This policy needs final-image false-activation and interruption acceptance
 on hardware; host decoding tests do not establish acoustic performance.
+
+## Foreground intercom
+
+See [INTERCOM_PROTOCOL.md](INTERCOM_PROTOCOL.md) for the complete bounded
+HTTPS/WSS and native endpoint contract. `GET/PUT /api/v1/intercom`,
+`POST/DELETE /api/v1/intercom/call`, and the fixed WSS path
+`/api/v1/intercom/stream` require an actual signed-in local account and real
+HTTPS. Mutations require CSRF and the exact HTTPS Origin even in development
+mode. A one-use ticket in the first WSS text frame authorizes streaming; no
+credential is accepted in a URL. The call id scopes cancellation so delayed
+requests cannot end a later call. Microphones start only after explicit caller
+action and default-off device permission, native privacy gates, a start cue
+and an acknowledged expiring Assist hold. See the guide for foreground/Safari
+certificate requirements and unqualified hardware limitations.

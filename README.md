@@ -12,19 +12,24 @@ LibreEcho release and is not endorsed by upstream or Amazon. Read
 [AI_DISCLOSURE.md](AI_DISCLOSURE.md) and the full [DISCLAIMER.md](DISCLAIMER.md).
 **There is no promised repair, recovery, unbricking, replacement or support service.**
 
-## Source and hardware status
+## Echo 2 intercom in 0.16.8
 
-The frozen personal `0.15.0` candidate for the full-size Echo 2nd Generation
-(`radar_puffin`) passed local source tests, cross-compilation, image/signature
-verification and complete installer preparation. It remains
-**`PREPARED_NOT_FLASHED`: no physical boot, audio, microphone or update acceptance.**
-The candidate's original build input for this component is `7119e28fc7464c321375f5b5df9d95c0051d3929`.
-Publication documentation is added above those frozen inputs; an existing binary
-is not relabelled as a build of the publication commit.
+Version `0.16.8` reduces the delayed sound of the phone caller's own voice
+returning through the Echo microphone during a two-way call. One full-size
+2017 Echo 2 (`radar_puffin`) ran the signed update. A subsequent iPhone call
+sounded better to the tester. Native Sendspin and the existing intercom are
+included in this UI source. [Intercom operation](docs/INTERCOM.md) ·
+[Release and installation notes](https://github.com/sn45k58myn-dev/LibreEcho/blob/docs/community-publication/docs/community/0.16.8.md) · [Product release](https://github.com/sn45k58myn-dev/LibreEcho/releases/tag/echo2-source-v0.16.8).
 
-Echo Dot 2 support is inherited from upstream and has not been qualified in this
-fork. **Echo 3, Echo Studio and additional boards are research targets only:
-unsupported, with no compatible image or enabled port provided here.**
+The intercom uses a separate echo canceller during the call. Its 30 ms local
+speaker-reference delay aligns playback with microphone capture inside the
+Echo. End-to-end call delay includes phone, network and audio buffering and
+varies between calls. Home Assistant voice and wake-word detection continue
+through their own audio path. See the [intercom protocol](docs/INTERCOM_PROTOCOL.md)
+and [microphone architecture](docs/MICROPHONE_ARCHITECTURE.md).
+
+Echo Dot 2 retains its upstream support status. This release targets the
+full-size Echo 2 only. Echo Studio and Echo 3 remain research targets.
 
 ## Four-repository layout
 
@@ -46,22 +51,15 @@ and preserve the existing source, test, licence and boot-chain rules.
 
 ## Build, installation and automation boundaries
 
-This publication contains source and documentation. No stable firmware release or
-working Echo 3/Studio port is announced. The locally prepared personal image uses
-a personal OTA public key and does not accept official LibreEcho OTA signatures;
-its private signing seed is not published.
+Use the [product release notes](https://github.com/sn45k58myn-dev/LibreEcho/blob/docs/community-publication/docs/community/0.16.8.md) for the coordinated source pins,
+checksums, and separate first-install and OTA instructions. The UI component
+alone does not install firmware. The tested system uses a community OTA
+signing identity. An existing device must trust the signer used for its update.
 
-Inherited build/release workflows and download wrappers still contain upstream
-repository defaults. They must not be presented as building or installing this
-fork. Fork GitHub Actions are to remain disabled until checkout identities,
-permissions, signing and release destinations have been adapted and reviewed.
-No remote CI success is claimed by this source publication.
-
-The original component documentation is preserved verbatim in
-[README.upstream.md](README.upstream.md). It describes an upstream snapshot;
-upstream badges, support claims, releases and install commands in that document
-are **not evidence or instructions for this fork's modified candidate**.
-Never bypass target, partition, boot-chain or signature checks to try a new board.
+The fork's AI disclosure, warranty disclaimer and upstream attribution apply.
+Inherited automation and download wrappers can point to upstream services.
+Use the product release instructions for the fork. The original UI
+documentation is preserved in [README.upstream.md](README.upstream.md).
 
 ## Known limitation
 
@@ -72,21 +70,20 @@ See the project build-status page for the evidence limits and next gates.
 
 ## Exact tested source history
 
-The [source-history bundle](docs/community/history/tested-source.bundle) preserves
-the tested source files and their history on top of the upstream baseline. The published commit IDs reflect an authorship metadata cleanup.
-It contains Git source objects, not device firmware or signing secrets. This also
-keeps the frozen build ledger usable when GitHub's API creates a publication
-commit with a new commit ID but the same checked source files.
+The [public UI source commit](https://github.com/sn45k58myn-dev/LibreEcho-UI/commit/984ebc22cf68f1900e931d1129357db91951ea06)
+has the same Git tree as the tested 0.16.8 UI source. Its parent is the
+previously published 0.16.3 UI source. The publication branch adds fork
+documentation and the [source-history bundle](docs/community/history/tested-source.bundle).
 
-On a Linux filesystem, after cloning this fork and making the upstream prerequisite
-available, verify and fetch the bundle without flashing or changing device state:
+To verify the bundle, run the following in a clone containing upstream base
+`b14f9eb4dc8343769eca86240bc258c9130fcc6b`.
 
 ```sh
 git bundle verify docs/community/history/tested-source.bundle
 git fetch docs/community/history/tested-source.bundle HEAD
 git rev-parse FETCH_HEAD
+git rev-parse 'FETCH_HEAD^{tree}'
 ```
 
-The last command must print `7119e28fc7464c321375f5b5df9d95c0051d3929`.
-The publication tree includes documentation above that frozen source; it does
-not claim an already-built binary was rebuilt from a new publication commit.
+Expected commit `984ebc22cf68f1900e931d1129357db91951ea06`. Expected source
+tree `41b650f94bd108acb2c57e6c073712cf70ce8dd6`.

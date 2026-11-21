@@ -238,6 +238,23 @@ static int random_bytes(struct le_ws *ws, unsigned char *out, size_t length)
 
 /* --- handshake ---------------------------------------------------------- */
 
+int le_ic_ws_accept(const char *key, char *out, size_t size)
+{
+    struct sha1 hash;
+    unsigned char digest[20], decoded[16];
+    char combined[128], canonical[25];
+    if (strlen(key) != 24 || key[22] != '=' || key[23] != '=' ||
+        le_b64_decode(key, decoded, sizeof decoded) != 16 ||
+        le_b64_encode(decoded, sizeof decoded, canonical, sizeof canonical) != 24 ||
+        strcmp(canonical, key) ||
+        snprintf(combined, sizeof combined, "%s%s", key, WS_GUID) >= (int)sizeof combined)
+        return -1;
+    sha1_init(&hash);
+    sha1_update(&hash, combined, strlen(combined));
+    sha1_final(&hash, digest);
+    return le_b64_encode(digest, sizeof digest, out, size) ? 0 : -1;
+}
+
 static int accept_matches(const char *response, const char *key)
 {
     struct sha1 hash;
