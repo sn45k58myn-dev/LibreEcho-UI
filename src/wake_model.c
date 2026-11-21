@@ -28,10 +28,13 @@ struct wake_model_contract {
 static const struct wake_model_contract contracts[LE_WAKE_MODEL_FILE_COUNT] = {
     {"melspectrogram.onnx", "input", "output", 0},
     {"embedding_model.onnx", "input_1", "conv2d_19", 0},
-    {"alexa_v0.1.onnx", "onnx::Flatten_0", "13", 1},
+    /* Classifier exporters assign different names to the final Sigmoid output. */
+    {"alexa_v0.1.onnx", "onnx::Flatten_0", NULL, 1},
 };
 
-static const char *const classifier_operators[] = {"Flatten", "Gemm", "Relu", "Sigmoid"};
+static const char *const classifier_operators[] = {
+    "Flatten", "Gemm", "Relu", "Sigmoid", "ReduceMean", "Sub", "Pow", "Add", "Sqrt", "Div", "Mul"
+};
 
 static const struct wake_model_contract *contract_for(const char *file)
 {
@@ -175,7 +178,7 @@ struct graph_scan {
     const char *expected_output;
     int input_present;
     unsigned output_count;
-    int output_matches;
+    struct pb_field output_name;
     unsigned node_count;
     int operator_refused;
     int sigmoid_produces_output;
@@ -208,8 +211,13 @@ static void scan_node(const unsigned char *data, size_t length, struct graph_sca
         if (f.number == 4 && f.wire == 2) {
             op = f;
             op_seen = 1;
-        } else if (f.number == 2 && f.wire == 2 && string_is(&f, scan->expected_output)) {
+        } else if (f.number == 2 && f.wire == 2 && scan->output_name.data &&
+                   f.length == scan->output_name.length &&
+                   !memcmp(f.data, scan->output_name.data, f.length)) {
             produces_output = 1;
+        } else if (restrict_operators && f.number == 7 && f.wire == 2 && f.length &&
+                   !string_is(&f, "ai.onnx")) {
+            scan->operator_refused = 1;
         }
     }
     ++scan->node_count;
@@ -258,8 +266,10 @@ static void scan_graph(const unsigned char *data, size_t length, struct graph_sc
             struct pb_field n;
             ++scan->output_count;
             while (v.p < v.end && !pb_next(&v, &n))
-                if (n.number == 1 && string_is(&n, scan->expected_output))
-                    scan->output_matches = 1;
+                if (n.number == 1 && n.wire == 2 && n.length && n.length <= 127 &&
+                    !memchr(n.data, '\0', n.length) &&
+                    (!scan->expected_output || string_is(&n, scan->expected_output)))
+                    scan->output_name = n;
         }
     }
     /* Pass two: nodes and initializers, now that the output name is known. */
@@ -318,7 +328,7 @@ int le_wake_model_validate_file(const char *path, const char *file_name,
     struct graph_scan scan;
     unsigned char *buffer;
     size_t total = 0;
-    int fd;
+    int fd, output_matches;
     char message[160];
 
     if (!path || !file_name)
@@ -376,13 +386,14 @@ int le_wake_model_validate_file(const char *path, const char *file_name,
     scan.expected_input = contract->input;
     scan.expected_output = contract->output;
     scan_model(buffer, total, &scan, contract->restrict_operators);
+    output_matches = scan.output_name.data != NULL;
     free(buffer);
 
     if (scan.external_data) {
         snprintf(message, sizeof(message), "%s refers to external weight data", file_name);
         return fail(reason, reason_size, message);
     }
-    if (!scan.input_present || !scan.output_matches || scan.output_count != 1) {
+    if (!scan.input_present || !output_matches || scan.output_count != 1) {
         snprintf(message, sizeof(message),
                  "%s graph inputs or outputs do not match the contract", file_name);
         return fail(reason, reason_size, message);

@@ -85,14 +85,15 @@ static void put_uint(struct writer *w, unsigned field, unsigned long long value)
 struct model_spec {
     const char *input;
     const char *output;
-    const char *ops[6];
+    const char *ops[12];
     int op_count;
     unsigned long long opset;
     int external;
     size_t pad;
 };
 
-static size_t build_model(unsigned char *out, size_t cap, const struct model_spec *spec)
+static size_t build_model_output(unsigned char *out, size_t cap, const struct model_spec *spec,
+                                 const char *node_output, const char *node_domain)
 {
     static unsigned char graph_bytes[8192];
     static unsigned char model_bytes[16384];
@@ -112,12 +113,14 @@ static size_t build_model(unsigned char *out, size_t cap, const struct model_spe
         node.n = 0;
         put_string(&node, 1, spec->input);
         if (i == spec->op_count - 1)
-            put_string(&node, 2, spec->output);
+            put_string(&node, 2, node_output);
         else {
             snprintf(produced, sizeof(produced), "t%d", i);
             put_string(&node, 2, produced);
         }
         put_string(&node, 4, spec->ops[i]);
+        if (node_domain)
+            put_string(&node, 7, node_domain);
         put_message(&graph, 1, &node);
     }
     if (spec->external) {
@@ -170,6 +173,11 @@ static size_t build_model(unsigned char *out, size_t cap, const struct model_spe
         return 0;
     memcpy(out, model_bytes, model.n);
     return model.n;
+}
+
+static size_t build_model(unsigned char *out, size_t cap, const struct model_spec *spec)
+{
+    return build_model_output(out, cap, spec, spec->output, NULL);
 }
 
 /* ---- filesystem helpers ---- */
@@ -254,11 +262,20 @@ static void check_contract(void)
     CHECK(le_wake_model_validate_file(path, "alexa_v0.1.onnx", reason, sizeof(reason)) == 0);
 
     {
-        struct model_spec s = classifier_good;
-        s.output = "14";
+        const struct model_spec s = {
+            "onnx::Flatten_0", "39", {"Flatten", "Gemm", "ReduceMean", "Sub", "Pow", "Add",
+                                    "Sqrt", "Div", "Mul", "Relu", "Sigmoid"}, 11, 13, 0, 1100};
         length = build_model(bytes, sizeof(bytes), &s);
         write_file(path, bytes, length);
+        CHECK(le_wake_model_validate_file(path, "alexa_v0.1.onnx", reason, sizeof(reason)) == 0);
+        length = build_model_output(bytes, sizeof(bytes), &s, "another_value", NULL);
+        write_file(path, bytes, length);
         CHECK(le_wake_model_validate_file(path, "alexa_v0.1.onnx", reason, sizeof(reason)) < 0);
+        CHECK(strstr(reason, "Sigmoid") != NULL);
+        length = build_model_output(bytes, sizeof(bytes), &s, s.output, "foreign");
+        write_file(path, bytes, length);
+        CHECK(le_wake_model_validate_file(path, "alexa_v0.1.onnx", reason, sizeof(reason)) < 0);
+        CHECK(strstr(reason, "operators") != NULL);
     }
     {
         struct model_spec s = classifier_good;
@@ -449,7 +466,7 @@ static void check_store(void)
         unsigned char bytes[16384];
         struct model_spec bad = classifier_good;
         size_t length;
-        bad.output = "wrong";
+        bad.input = "wrong";
         length = build_model(bytes, sizeof(bytes), &bad);
         stage_file(&paths, "bad-word", "melspectrogram.onnx", source);
         stage_file(&paths, "bad-word", "embedding_model.onnx", source);

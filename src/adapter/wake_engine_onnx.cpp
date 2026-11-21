@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -61,6 +62,23 @@ Ort::SessionOptions session_options(unsigned int threads)
     return options;
 }
 
+struct WakeClassifier {
+    Ort::Session session;
+    std::string output_name;
+
+    WakeClassifier(Ort::Env &env, const char *path, unsigned int threads)
+        : session(env, path, session_options(threads))
+    {
+        if (session.GetInputCount() != 1 || session.GetOutputCount() != 1)
+            throw std::runtime_error("wake classifier requires one input and one output");
+        Ort::AllocatorWithDefaultOptions allocator;
+        auto name = session.GetOutputNameAllocated(0, allocator);
+        if (!name || !*name.get())
+            throw std::runtime_error("wake classifier has no output name");
+        output_name = name.get();
+    }
+};
+
 class WakeEngine {
 public:
     WakeEngine(const char *directory, unsigned int threads,
@@ -71,8 +89,7 @@ public:
           embedding_(
               env_, model_path(directory, "embedding_model.onnx").c_str(),
               session_options(threads)),
-          classifier_(env_, model_path(directory, "alexa_v0.1.onnx").c_str(),
-                      session_options(threads)),
+          classifier_(env_, model_path(directory, "alexa_v0.1.onnx").c_str(), threads),
           memory_(Ort::MemoryInfo::CreateCpu(
               OrtArenaAllocator, OrtMemTypeDefault))
     {
@@ -82,8 +99,7 @@ public:
         overlap_.fill(0);
         if (second_classifier) {
             try {
-                second_classifier_.reset(new Ort::Session(
-                    env_, second_classifier, session_options(threads)));
+                second_classifier_ = std::make_unique<WakeClassifier>(env_, second_classifier, threads);
             } catch (const std::exception &error) {
                 std::fprintf(stderr,
                              "wake: second word not loaded: %s\n",
@@ -210,7 +226,7 @@ private:
             scores[i] = std::max(0.0f, std::min(1.0f, word_scores[i]));
     }
 
-    float RunClassifier(Ort::Session &classifier)
+    float RunClassifier(WakeClassifier &classifier)
     {
         std::array<int64_t, 3> classifier_shape{
             1, static_cast<int64_t>(kFeatureFrames),
@@ -221,11 +237,17 @@ private:
             classifier_shape.size());
         const char *classifier_input_names[] = {
             "onnx::Flatten_0"};
-        const char *classifier_output_names[] = {"13"};
-        auto classifier_values = classifier.Run(
+        const char *classifier_output_names[] = {classifier.output_name.c_str()};
+        auto classifier_values = classifier.session.Run(
             Ort::RunOptions{nullptr}, classifier_input_names,
             &classifier_input, 1, classifier_output_names, 1);
-        return classifier_values[0].GetTensorData<float>()[0];
+        const auto info = classifier_values[0].GetTensorTypeAndShapeInfo();
+        if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT || info.GetElementCount() != 1)
+            throw std::runtime_error("wake classifier must return one float score");
+        const float score = classifier_values[0].GetTensorData<float>()[0];
+        if (!std::isfinite(score))
+            throw std::runtime_error("wake classifier returned a non-finite score");
+        return score;
     }
 
     void AppendMel(const float *frames, std::size_t count)
@@ -285,8 +307,8 @@ private:
     Ort::Env env_;
     Ort::Session mel_;
     Ort::Session embedding_;
-    Ort::Session classifier_;
-    std::unique_ptr<Ort::Session> second_classifier_;
+    WakeClassifier classifier_;
+    std::unique_ptr<WakeClassifier> second_classifier_;
     Ort::MemoryInfo memory_;
     std::array<int16_t, kBlockSamples> accumulated_{};
     std::array<int16_t, kOverlapSamples> overlap_{};
