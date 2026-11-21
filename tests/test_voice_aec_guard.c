@@ -27,7 +27,8 @@ struct test_packet {
 };
 
 /* Fake reference sender: 2048 frames at 48 kHz -> about 682 samples at 16. */
-static int send_packet(int fd, const char *path, uint32_t sequence)
+static int send_packet(int fd, const char *path, uint32_t sequence,
+                       uint64_t stamp, int active)
 {
     struct sockaddr_un address;
     struct test_packet packet;
@@ -42,8 +43,8 @@ static int send_packet(int fd, const char *path, uint32_t sequence)
     packet.header.sample_rate = LE_VOICE_REFERENCE_INPUT_RATE;
     packet.header.channels = 1;
     packet.header.frames = LE_VOICE_REFERENCE_MAX_PACKET_FRAMES;
-    packet.header.activity_mask = 1;
-    packet.header.monotonic_ns = 1000000000ULL;
+    packet.header.activity_mask = active ? 1U : 0U;
+    packet.header.monotonic_ns = stamp;
     for (i = 0; i < packet.header.frames; ++i)
         packet.samples[i] = (int16_t)(((i % 200U) - 100U) * 20);
     memset(&address, 0, sizeof(address));
@@ -61,7 +62,7 @@ static int send_packet(int fd, const char *path, uint32_t sequence)
 static void frame(struct le_voice_aec *aec,
                   struct le_voice_aec_guard *guard,
                   struct le_voice_reference *reference,
-                  int active, uint64_t now_ns, uint64_t *aec_frames)
+                  uint64_t now_ns, uint64_t *aec_frames)
 {
     int16_t mic[LE_VOICE_AEC_FRAME_SAMPLES];
     int16_t far_end[LE_VOICE_AEC_FRAME_SAMPLES];
@@ -70,8 +71,8 @@ static void frame(struct le_voice_aec *aec,
 
     for (i = 0; i < LE_VOICE_AEC_FRAME_SAMPLES; ++i)
         mic[i] = (int16_t)(((i * 7U) % 300U) - 150);
-    (void)le_voice_aec_guard_update(guard, aec, reference, active, now_ns);
-    if (active) {
+    (void)le_voice_aec_guard_update(guard, aec, reference, now_ns);
+    if (le_voice_reference_active(reference, now_ns, LE_VOICE_REFERENCE_TAIL_NS)) {
         le_voice_reference_read(reference, far_end,
                                 LE_VOICE_AEC_FRAME_SAMPLES);
         le_voice_aec_process(aec, mic, far_end, clean);
@@ -128,61 +129,70 @@ int main(void)
     sender = socket(AF_UNIX, SOCK_DGRAM, 0);
     CHECK(sender >= 0);
 
-    /* Idle: stale audio sits in the ring, nothing consumes it. */
-    CHECK(send_packet(sender, sock, 0) == 0);
-    CHECK(send_packet(sender, sock, 1) == 0);
+    /* Idle keepalives cannot seed a stale queue at the next call. */
+    CHECK(send_packet(sender, sock, 0, now, 0) == 0);
+    CHECK(send_packet(sender, sock, 1, now, 0) == 0);
     CHECK(le_voice_reference_drain(&reference) == 2);
-    CHECK(reference.count > 1000);
-    frame(&aec, &guard, &reference, 0, now, &aec_frames);
+    CHECK(reference.count == 0);
+    frame(&aec, &guard, &reference, now, &aec_frames);
     CHECK(guard.aec_resets == 0);
-    CHECK(reference.count > 1000);
+    CHECK(aec_frames == 0);
 
-    /* Rising edge: ring cleared, AEC filter kept. */
+    /* A new active period and padding both arrive before the mic wakes.
+     * The first period must survive, and padding must not turn AEC off. */
     now += 10000000ULL;
-    frame(&aec, &guard, &reference, 1, now, &aec_frames);
+    CHECK(send_packet(sender, sock, 2, now, 1) == 0);
+    CHECK(send_packet(sender, sock, 3, now, 0) == 0);
+    CHECK(le_voice_reference_drain(&reference) == 2);
+    before = reference.count;
+    CHECK(before >= 1364);
+    frame(&aec, &guard, &reference, now, &aec_frames);
     CHECK(guard.aec_resets == 0 && guard.edge_clears == 1);
     CHECK(guard.discontinuity_resets == 0);
-    CHECK(reference.count == 0 || reference.underflows >= 1);
-    CHECK(reference.count < 200);
+    CHECK(reference.count == before - LE_VOICE_AEC_FRAME_SAMPLES);
+    CHECK(reference.underflows == 0 && aec_frames == 1);
 
     /* Continuous reference: no further resets, ring not cleared. */
-    for (i = 2; i < 7; ++i)
-        CHECK(send_packet(sender, sock, (uint32_t)i) == 0);
+    for (i = 4; i < 9; ++i)
+        CHECK(send_packet(sender, sock, (uint32_t)i, now, 1) == 0);
     CHECK(le_voice_reference_drain(&reference) == 5);
     before = reference.count;
     CHECK(before > 1000);
     for (i = 0; i < 20; ++i) {
         now += 10000000ULL;
-        frame(&aec, &guard, &reference, 1, now, &aec_frames);
+        frame(&aec, &guard, &reference, now, &aec_frames);
     }
     CHECK(guard.aec_resets == 0);
     CHECK(reference.count == before - 20U * LE_VOICE_AEC_FRAME_SAMPLES);
     CHECK(reference.discontinuities == 0);
 
     /* Sequence gap: reference drops its ring, AEC is reset. */
-    CHECK(send_packet(sender, sock, 9) == 0);
+    CHECK(send_packet(sender, sock, 10, now, 1) == 0);
     CHECK(le_voice_reference_drain(&reference) == 1);
     CHECK(reference.discontinuities == 1);
     CHECK(reference.count < 700);
     now += 10000000ULL;
-    frame(&aec, &guard, &reference, 1, now, &aec_frames);
+    frame(&aec, &guard, &reference, now, &aec_frames);
     CHECK(guard.aec_resets == 1 && guard.discontinuity_resets == 1);
     CHECK(guard.edge_clears == 1);
     for (i = 0; i < 5; ++i) {
         now += 10000000ULL;
-        frame(&aec, &guard, &reference, 1, now, &aec_frames);
+        frame(&aec, &guard, &reference, now, &aec_frames);
     }
     CHECK(guard.aec_resets == 1);
 
-    /* Playback stops, then starts again: second rising edge. */
+    /* After a true idle gap preserve the next active packet, even when
+     * no separate keepalive or idle microphone frame marks the boundary. */
     now += 500000000ULL;
-    frame(&aec, &guard, &reference, 0, now, &aec_frames);
-    CHECK(send_packet(sender, sock, 10) == 0);
+    CHECK(!le_voice_reference_active(&reference, now, LE_VOICE_REFERENCE_TAIL_NS));
+    CHECK(send_packet(sender, sock, 11, now, 1) == 0);
     CHECK(le_voice_reference_drain(&reference) == 1);
     now += 10000000ULL;
-    frame(&aec, &guard, &reference, 1, now, &aec_frames);
+    before = reference.count;
+    frame(&aec, &guard, &reference, now, &aec_frames);
     CHECK(guard.aec_resets == 1 && guard.edge_clears == 2);
-    CHECK(reference.count < 200);
+    CHECK(before >= 680 && before <= 683);
+    CHECK(reference.count == before - LE_VOICE_AEC_FRAME_SAMPLES);
 
     /* Status file: counters, rate-limited rewrite, forced rewrite. */
     le_voice_aec_guard_status(&guard, &reference, 1, aec_frames, now, 0);

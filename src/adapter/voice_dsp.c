@@ -192,6 +192,27 @@ void le_voice_process_interleaved(
     }
 }
 
+void le_voice_mic_gain(int16_t *samples, size_t count,
+                       unsigned int gain_hundredths, int aec_headroom)
+{
+    int64_t divisor = aec_headroom ? 200 : 100;
+    size_t i;
+
+    if (gain_hundredths == (unsigned int)divisor)
+        return;
+    for (i = 0; i < count; ++i)
+        samples[i] = saturate_s16(samples[i] * (int64_t)gain_hundredths /
+                                  divisor);
+}
+
+void le_voice_restore_headroom(int16_t *samples, size_t count)
+{
+    size_t i;
+
+    for (i = 0; i < count; ++i)
+        samples[i] = saturate_s16((int32_t)samples[i] * 2);
+}
+
 void le_voice_vad_init(struct le_voice_vad *vad)
 {
     memset(vad, 0, sizeof(*vad));

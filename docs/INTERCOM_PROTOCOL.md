@@ -58,10 +58,13 @@ to two maximum frames, transmit buffering to four maximum frames, and each
 event-loop pass has a fixed frame budget. No web thread or unbounded allocation
 is introduced. A saturated queue closes the call rather than silently delaying
 speech. The browser's capture worklet has two outstanding packet credits and
-a six-packet playback ceiling. When browser scheduling briefly falls behind,
-the worklet discards unsent capture or the oldest queued playback. WebSocket
-sequence numbers still count only transmitted packets. Sustained overload ends
-the call.
+a six-packet playback ceiling. The phone starts playback after two 20 ms
+packets arrive, adding one packet interval (normally 20 ms) from the first
+arrival. If playout runs dry, it waits for two fresh packets again. This
+buffer applies only to the sound coming from the room. When browser scheduling
+briefly falls behind, the worklet discards unsent capture or the oldest queued
+playback. WebSocket sequence numbers still count only transmitted packets.
+Sustained overload ends the call.
 
 ## Native endpoint boundary
 
@@ -80,8 +83,15 @@ After the stream acknowledgement it sends the five bytes `READY`. Subsequent
 datagrams in both directions are exactly 640 PCM bytes. No sequence header is
 needed inside the ordered Unix connection. Oversized datagrams fail closed.
 
-Phone-to-room PCM is converted by the existing streaming resampler to the
-48 kHz stereo system bus. A single bounded pending output block is allowed.
+The phone filters its microphone signal before converting it to 16 kHz PCM.
+The companion resamples it to the 48 kHz stereo system bus and writes each
+block as soon as the FIFO accepts it. Up to four 20 ms blocks can wait through
+a short stall. A fifth displaces the oldest, and blocks older than 100 ms expire.
+After a connected call, the companion writes `/run/libreecho/intercom-last-call.json`
+with the number of phone packets, samples at the 16-bit limits, undelivered
+blocks (including any queued at hangup), and writes that found the FIFO full.
+This device-local summary contains only counts. The file and its rotation
+live in RAM.
 Room-to-phone PCM validates indexed frames and packs them into 20 ms packets.
 Missing samples, overrun, lost acknowledgement, three seconds without incoming
 phone PCM, EOF, a device gate change or normal process termination removes the lease,

@@ -260,6 +260,17 @@ bounded status to `/run/libreecho/esphome-status.json`. Its init script is
 `/var/run/libreecho-esphomed.pid`. Stable factory/persisted device identity is
 retained; this migration does not change network or kernel policy.
 
+The owner-readable status file includes `last_assist_reply` for timing diagnosis.
+It is `null` until an Assist turn with observed speech or reply activity ends.
+Once sampled, it reports elapsed device-monotonic milliseconds from receipt of
+Home Assistant's voice-activity end event to its first TTS start signal
+(`tts_start_ms`) and to the first non-silent reply frame written to the audio bus
+(`first_pcm_ms`). The bus measurement precedes hardware playback. An absent
+event or unavailable duration is `null`. `underruns` counts reply playback
+underruns, and is `null` if playback never started. Standalone announcements and
+idle server-wake streams leave the last sample intact. The sample lives in the
+daemon and its private runtime status file and contains only timing and counts.
+
 `GET /api/v1/voice-pipeline` reports `home_assistant.protocol: "esphome"`,
 `port: 6053`, `ready`, and `connected`. Readiness binds the trusted daemon
 executable, PID/start time/boot identity and its own listening-socket inode to

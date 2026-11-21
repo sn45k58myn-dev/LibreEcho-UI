@@ -31,6 +31,9 @@ struct esp_playback {
  int wav_stage,data_unbounded;uint32_t riff;uint64_t wav_bytes,skip,data_left,mp3_skipped;
  unsigned char dns_query[300];size_t dns_query_len;uint16_t dns_id;
  int rate,channels,source_rate;uint64_t input_frames,audio_frames,frames,origin,deadline,idle_deadline,drain_until;unsigned underruns;
+ /* First non-silent reply frame accepted by the bus; pre-roll is separate. */
+ uint64_t first_pcm_at;
+ int first_pcm_seen;
  int16_t output[8192*2];size_t output_len,output_sent;
  /* Stall recovery: the resolved address, body bytes already handed to the
   * decoder, bytes of a replayed body still to skip, and its first bytes to compare. */

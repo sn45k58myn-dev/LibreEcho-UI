@@ -36,7 +36,6 @@ static void guard_log(struct le_voice_aec_guard *guard, uint64_t now_ns,
 int le_voice_aec_guard_update(struct le_voice_aec_guard *guard,
                               struct le_voice_aec *aec,
                               struct le_voice_reference *reference,
-                              int reference_active,
                               uint64_t now_ns)
 {
     const char *why = NULL;
@@ -44,14 +43,10 @@ int le_voice_aec_guard_update(struct le_voice_aec_guard *guard,
 
     if (!guard || !aec || !reference)
         return 0;
-    if (reference_active && !guard->previous_active) {
-        /* Playback start after idle: the ring only holds stale samples
-         * (nothing consumed them while idle), which would misalign the
-         * reference against the echo.  The filter itself is kept: the
-         * speaker-to-mic path is the same as in the previous session, so
-         * its weights are a better start than a cold, unconverged one. */
-        le_voice_reference_clear(reference);
-        ++guard->edge_clears;
+    if (reference->edge_clears != guard->edge_clears) {
+        /* Packet ingestion discarded the stale reference before enqueueing
+         * the new audio. Preserve the trained room filter at this boundary. */
+        guard->edge_clears = reference->edge_clears;
         cleared = 1;
     }
     if (reference->discontinuities != guard->seen_discontinuities) {
@@ -61,7 +56,6 @@ int le_voice_aec_guard_update(struct le_voice_aec_guard *guard,
         ++guard->discontinuity_resets;
         why = "AEC reset: reference sequence gap";
     }
-    guard->previous_active = reference_active;
     if (!why) {
         if (cleared)
             guard_log(guard, now_ns,

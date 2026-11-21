@@ -1,11 +1,15 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
-let Processor;
 class Base {constructor(){this.port={onmessage:null,postMessage:()=>{}};}}
-vm.runInNewContext(fs.readFileSync('web/js/intercom-worklet.js','utf8'),{
-  AudioWorkletProcessor:Base,sampleRate:48000,Int16Array,Float32Array,Math,
-  registerProcessor:(name,type)=>{assert.equal(name,'libreecho-intercom');Processor=type;}
-});
+function loadProcessor(sampleRate){
+  let Processor;
+  vm.runInNewContext(fs.readFileSync('web/js/intercom-worklet.js','utf8'),{
+    AudioWorkletProcessor:Base,sampleRate,Int16Array,Float32Array,Math,
+    registerProcessor:(name,type)=>{assert.equal(name,'libreecho-intercom');Processor=type;}
+  });
+  return Processor;
+}
+const Processor=loadProcessor(48000);
 const p=new Processor();let packets=0;
 p.port.postMessage=data=>{if(data.type==='pcm'){assert.equal(data.buffer.byteLength,640);packets++;p.port.onmessage({data:{type:'credit'}});}};
 p.port.onmessage({data:{type:'arm'}});
@@ -26,6 +30,38 @@ function receivePacket(processor,number){
   processor.port.onmessage({data:{type:'pcm',buffer:pcm.buffer}});
   assert.ok(processor.count>=0&&processor.count<=1920);assert.equal(processor.ring.length,4096);
 }
+// Schedule packets against a running audio clock at the start of each 128-frame
+// render quantum. A nonzero constant makes an inserted silent gap observable.
+function checkReturnPlayback(rate){
+  const Worklet=loadProcessor(rate),player=new Worklet();
+  const framesPerBlock=128;
+  const at=ms=>Math.ceil(ms*rate/(1000*framesPerBlock));
+  const arrivals=[0,35,40,75,80,100,120,140,160,180,200,220,240];
+  const firstAfterGap=arrivals.length;
+  // After an underrun, one isolated packet arrives at 400 ms. Its partner at
+  // 420 ms restarts playback. The 475 ms arrival is a further 15 ms late.
+  arrivals.push(400,420,440,475);
+  for(let ms=480;ms<=2500;ms+=20)arrivals.push(ms);
+  let next=0;
+  for(let block=0;block<at(2500);block++){
+    while(next<arrivals.length && block===at(arrivals[next])){
+      const pcm=new Int16Array(320).fill(next<firstAfterGap?8192:16384);
+      player.port.onmessage({data:{type:'pcm',buffer:pcm.buffer}});
+      next++;
+    }
+    const output=new Float32Array(framesPerBlock);
+    player.process([],[[output]]);
+    if(block<at(35) || (block>=at(320) && block<at(420))){
+      assert.ok(output.every(v=>v===0),'playback waits for two packets, including after underrun');
+    }else if(block>=at(35) && block<at(240)){
+      assert.ok(output.every(v=>v===.25),'short packet delays must not interrupt playout');
+    }else if(block>=at(420)){
+      assert.ok(output.every(v=>v===.5),'recovered playout is continuous and contains fresh samples');
+    }
+  }
+}
+checkReturnPlayback(44100);
+checkReturnPlayback(48000);
 // A foreground main-thread pause leaves two packets in flight. Audio continues
 // in the worklet: discard unsent old capture rather than record a growing queue.
 const delayed=new Processor(),captured=[];let outstanding=0,maximumOutstanding=0,acknowledge=false,delayErrors=0;
@@ -126,3 +162,39 @@ assert.equal(malformedReason,'invalid-playback');
   listeners.pagehide();assert.equal(elements.get('intercom-start').disabled,true);
   console.log('intercom browser synthetic rate conversion, bounded queues, explicit capture and scoped late cleanup: PASS');
 })().catch(error=>{console.error(error);process.exitCode=1;});
+
+// A phone runs its AudioContext at the hardware rate. Frequencies beyond the
+// 8 kHz wire Nyquist limit must be removed before packing the microphone PCM.
+function captureTone(rate, frequency) {
+  const Worklet=loadProcessor(rate), worklet=new Worklet();
+  let packets=0, samples=0, energy=0;
+  worklet.port.onmessage({data:{type:'arm'}});
+  worklet.port.postMessage=message=>{
+    assert.equal(message.type,'pcm');
+    const pcm=new Int16Array(message.buffer);
+    assert.equal(pcm.length,320);
+    if (++packets>1) { // exclude the filter startup transient
+      for (const sample of pcm) energy+=(sample/32768)**2;
+      samples+=pcm.length;
+    }
+    worklet.port.onmessage({data:{type:'credit'}});
+  };
+  const durationFrames=rate/5;
+  for (let first=0;first<durationFrames;first+=128) {
+    const size=Math.min(128,durationFrames-first);
+    const input=Float32Array.from({length:size},(_,i)=>.5*Math.sin(2*Math.PI*frequency*(first+i)/rate));
+    const output=new Float32Array(size);
+    worklet.process([[input]],[[output]]);
+    assert.ok(output.every(value=>value===0),'the phone must not monitor its own microphone');
+  }
+  assert.equal(packets,10,'200 ms of microphone input must produce ten packets');
+  return 10*Math.log10(energy/samples/.125); // input amplitude .5, mean square .125
+}
+for (const rate of [44100,48000,96000]) {
+  assert.ok(Math.abs(captureTone(rate,5500))<.3,`${rate} Hz capture should preserve the speech passband`);
+  assert.ok(captureTone(rate,8500)<-30,`${rate} Hz capture leaked energy above 8 kHz into speech`);
+  assert.ok(captureTone(rate,10000)<-45,`${rate} Hz capture aliased 10 kHz into speech`);
+}
+for (const rate of [8000,16000]) {
+  assert.ok(Math.abs(captureTone(rate,1000))<.3,`${rate} Hz capture should keep speech level and packet cadence`);
+}

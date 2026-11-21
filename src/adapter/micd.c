@@ -2,6 +2,7 @@
 #include "log.h"
 #include "mic_beamformer.h"
 #include "voice_dsp.h"
+#include "../json.h"
 
 #include <errno.h>
 #include <math.h>
@@ -573,25 +574,6 @@ static void format_mic_list(unsigned int mask, char *out, size_t size)
     out[used] = '\0';
 }
 
-static void apply_digital_gain(int16_t *samples, size_t count,
-                               unsigned int gain_hundredths)
-{
-    size_t i;
-
-    if (gain_hundredths == MIC_DIGITAL_GAIN_UNITY)
-        return;
-    for (i = 0; i < count; ++i) {
-        int32_t scaled = (int32_t)((samples[i] * (int32_t)gain_hundredths) /
-                                   (int32_t)MIC_DIGITAL_GAIN_UNITY);
-
-        if (scaled > INT16_MAX)
-            scaled = INT16_MAX;
-        else if (scaled < INT16_MIN)
-            scaled = INT16_MIN;
-        samples[i] = (int16_t)scaled;
-    }
-}
-
 /*
  * Map the owner's 0..100 microphone gain onto the codec's MICPGA control.
  *
@@ -934,7 +916,8 @@ static pid_t start_capture(const struct micd_config *config, int output_fd)
  */
 static int relay_capture_mono(int client_fd, unsigned long id,
                               const char *header, size_t header_size,
-                              const struct micd_config *config)
+                              const struct micd_config *config,
+                              int aec_headroom)
 {
     static const uint8_t identity_map[LE_VOICE_LOGICAL_CHANNELS] =
         {0, 1, 2, 3, 4, 5, 6};
@@ -1020,7 +1003,7 @@ static int relay_capture_mono(int client_fd, unsigned long id,
                     if (beamformer.fill == 0)
                         beam_view_publish(&beamformer);
                 }
-                apply_digital_gain(output, frames, digital_gain);
+                le_voice_mic_gain(output, frames, digital_gain, aec_headroom);
                 if (write_all(client_fd, output,
                               frames * sizeof(output[0])) < 0)
                     break;
@@ -1043,7 +1026,7 @@ static int relay_capture_mono(int client_fd, unsigned long id,
 }
 
 static void run_stream_worker(int client_fd, unsigned long id, int channel,
-                              int calibrated_mono,
+                              int calibrated_mono, int aec_headroom,
                               const struct micd_config *config)
 {
     char data[512];
@@ -1064,7 +1047,9 @@ static void run_stream_worker(int client_fd, unsigned long id, int channel,
             "\"logical_map\":\"measured\","
             "\"beamforming\":\"fixed_beam_select\","
             "\"beams\":%d,\"latency_samples\":%d,"
-            "\"highpass_hz\":80}", mics, LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT);
+            "\"highpass_hz\":80,\"aec_headroom\":%s}",
+            mics, LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT,
+            aec_headroom ? "true" : "false");
     } else {
         n = snprintf(data, sizeof(data),
                      "{\"format\":\"pcm_s24_3le\",\"rate\":16000,"
@@ -1080,7 +1065,7 @@ static void run_stream_worker(int client_fd, unsigned long id, int channel,
         if (calibrated_mono) {
             /* relay_capture_mono sends this header once capture has started. */
             (void)relay_capture_mono(client_fd, id, response, (size_t)n,
-                                     config);
+                                     config, aec_headroom);
         } else if (write_all(client_fd, response, (size_t)n) == 0) {
             (void)relay_capture(client_fd, config);
         }
@@ -1299,7 +1284,7 @@ int main(int argc, char **argv)
             }
             if (worker == 0) {
                 close(listen_fd);
-                run_stream_worker(client_fd, id, channel, 0, &config);
+                run_stream_worker(client_fd, id, channel, 0, 0, &config);
                 _exit(0);
             }
             stream_worker = worker;
@@ -1307,6 +1292,9 @@ int main(int argc, char **argv)
             le_log_info("raw microphone stream started (lane=%d)", channel);
         } else if (!strcmp(command, "stream_mono")) {
             pid_t worker;
+            int aec_headroom = 0;
+
+            (void)json_get_bool(args, "aec_headroom", &aec_headroom);
             if (access(config.pcm_path, R_OK) != 0) {
                 (void)respond(client_fd, id, 0,
                               "microphone capture endpoint unavailable");
@@ -1335,7 +1323,7 @@ int main(int argc, char **argv)
             }
             if (worker == 0) {
                 close(listen_fd);
-                run_stream_worker(client_fd, id, 0, 1, &config);
+                run_stream_worker(client_fd, id, 0, 1, aec_headroom, &config);
                 _exit(0);
             }
             stream_worker = worker;

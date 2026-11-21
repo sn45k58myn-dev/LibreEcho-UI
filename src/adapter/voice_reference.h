@@ -10,6 +10,9 @@
 #define LE_VOICE_REFERENCE_OUTPUT_RATE 16000U
 #define LE_VOICE_REFERENCE_MAX_PACKET_FRAMES 2048U
 #define LE_VOICE_REFERENCE_RING_SAMPLES 8192U
+/* The render writes lead the DAC. Keep cancelling through the last write,
+ * capture buffering and the room tail, even when the mixer starts padding. */
+#define LE_VOICE_REFERENCE_TAIL_NS 250000000ULL
 
 struct le_voice_reference_header {
     uint32_t magic;
@@ -32,8 +35,8 @@ struct le_voice_reference {
     size_t head;
     size_t count;
     uint32_t expected_sequence;
-    uint64_t last_packet_ns;
-    unsigned int activity_mask;
+    uint64_t last_active_ns;
+    unsigned int edge_clears;
     unsigned int packets;
     unsigned int malformed_packets;
     unsigned int discontinuities;
@@ -52,8 +55,6 @@ void le_voice_reference_read(struct le_voice_reference *reference,
 int le_voice_reference_active(const struct le_voice_reference *reference,
                               uint64_t now_ns,
                               uint64_t timeout_ns);
-/* Drops buffered samples and resampler history (not the counters). */
-void le_voice_reference_clear(struct le_voice_reference *reference);
 void le_voice_reference_close(struct le_voice_reference *reference);
 
 #endif

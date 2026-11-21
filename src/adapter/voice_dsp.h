@@ -90,6 +90,11 @@ void le_voice_highpass_init(struct le_voice_highpass *filter);
 int16_t le_voice_highpass_sample(struct le_voice_highpass *filter,
                                  int16_t input);
 
+/* Keep 6 dB of digital headroom until after echo cancellation. */
+void le_voice_mic_gain(int16_t *samples, size_t count,
+                       unsigned int gain_hundredths, int aec_headroom);
+void le_voice_restore_headroom(int16_t *samples, size_t count);
+
 void le_voice_process_interleaved(
     const uint8_t *raw,
     size_t frames,

@@ -225,6 +225,17 @@ static int finish(struct esp_playback *p){uint64_t desired;
 static int play_once(struct esp_playback *p,uint64_t now){int rc;
  if(p->output_sent<p->output_len){ssize_t got;if(p->bus_fd<0&&bus_open(p))return -1;pace(p,now);if(p->frames*1000/48000>now-p->origin+AUDIO_LEAD_MS)return 0;
   got=write(p->bus_fd,(unsigned char*)p->output+p->output_sent,p->output_len-p->output_sent);if(got<0&&(errno==EAGAIN||errno==EWOULDBLOCK))return 0;if(got<=0)return -1;
+  if(!p->first_pcm_seen){
+   /* Only inspect complete stereo frames accepted by this write. */
+   size_t end=(p->output_sent+(size_t)got)/4;
+   for(size_t frame=p->output_sent/4;frame<end;frame++){
+    if(p->output[2*frame]||p->output[2*frame+1]){
+     p->first_pcm_at=now;
+     p->first_pcm_seen=1;
+     break;
+    }
+   }
+  }
   p->output_sent+=(size_t)got;if(p->output_sent<p->output_len)return 1;p->frames+=p->output_len/4;p->audio_frames+=p->output_len/4;p->output_len=p->output_sent=0;return 1;}
  if(p->header_done){rc=decode(p);if(rc<0)return -1;if(rc==1)return 1;if(rc==2)return finish(p);}
  return silence(p,now);

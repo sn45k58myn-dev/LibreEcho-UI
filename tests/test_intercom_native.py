@@ -146,7 +146,8 @@ with tempfile.TemporaryDirectory(prefix="intercom-native-", dir=os.environ.get("
                              "--config", str(config), "--privacy-state", str(d / "privacy"),
                              "--audio-socket", str(d / "audio"), "--led-socket", str(d / "led"),
                              "--wake-socket", str(d / "wake"), "--audio-bus", str(d / "bus"),
-                             "--lease", str(d / "lease"), "--assist-ack", str(d / "ack")],
+                             "--lease", str(d / "lease"), "--assist-ack", str(d / "ack"),
+                             "--stats-file", str(d / "stats")],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         eventually(lambda: (d / "call").exists())
@@ -251,6 +252,37 @@ with tempfile.TemporaryDirectory(prefix="intercom-native-", dir=os.environ.get("
         client.close()
         eventually(lambda: not (d / "lease").exists())
         status["muted"] = False
+        # A 2048-frame / 48 kHz mixer period spans just over two 20 ms
+        # phone packets. Test a busy FIFO at that boundary with distinct
+        # sample values so a lost packet cannot pass as successful speech.
+        hold_full_bus()
+        client = connect()
+        assert client.recv(1024) == b"READY"
+        started = time.monotonic()
+        marker_values = (2000, 4000, 6000)
+        for index, value in enumerate(marker_values):
+            time.sleep(max(0, started + .020 * index - time.monotonic()))
+            samples = [value] * 320
+            if index == 0:
+                samples[:2] = [-32768, 32767]
+            client.send(struct.pack("<320h", *samples))
+        time.sleep(max(0, started + 2048 / 48000 - time.monotonic()))
+        drain_allowed.set()
+        eventually(lambda: skip_bus_bytes[0] == 0 and len(speaker_pcm) >= 3800)
+        eventually(lambda: struct.pack("<h", marker_values[-1]) * 32 in speaker_pcm)
+        cursor = 0
+        for value in marker_values:
+            marker = struct.pack("<h", value) * 32
+            found = speaker_pcm.find(marker, cursor)
+            assert found >= 0, f"20 ms speech packet {value} lost during one mixer period"
+            cursor = found + len(marker)
+        client.close()
+        eventually(lambda: not (d / "lease").exists())
+        eventually(lambda: json.loads((d / "stats").read_text())["phone_packets"] == 3)
+        summary = json.loads((d / "stats").read_text())
+        assert summary["phone_rail_samples"] == 2 and summary["fifo_blocked_writes"] > 0
+        assert summary["phone_dropped_blocks"] == 0
+        print("intercom native retains ordered phone speech across a full mixer period: PASS")
         hold_full_bus()
         client = connect()
         assert client.recv(1024) == b"READY"
@@ -263,6 +295,7 @@ with tempfile.TemporaryDirectory(prefix="intercom-native-", dir=os.environ.get("
         assert struct.unpack("<h", speaker_pcm[:2])[0] > 10000, "sink replayed stale queued speech"
         client.close()
         eventually(lambda: not (d / "lease").exists())
+        eventually(lambda: json.loads((d / "stats").read_text())["phone_dropped_blocks"] > 0)
         print("intercom native full FIFO held1.6s, current-audio recovery and cleanup: PASS")
         hold_full_bus()
         client = connect()

@@ -117,6 +117,18 @@ int main(void)
     CHECK(le_voice_highpass_sample(&highpass, 1000) >= -1);
     CHECK(le_voice_highpass_sample(&highpass, 1000) <= 1);
 
+    {
+        int16_t base[] = {80, -80, 14000, -14000};
+        int16_t headroom[] = {80, -80, 14000, -14000};
+
+        le_voice_mic_gain(base, 4, 400U, 0);
+        le_voice_mic_gain(headroom, 4, 400U, 1);
+        CHECK(base[2] == INT16_MAX && base[3] == INT16_MIN);
+        CHECK(headroom[2] == 28000 && headroom[3] == -28000);
+        le_voice_restore_headroom(headroom, 4);
+        CHECK(memcmp(base, headroom, sizeof(base)) == 0);
+    }
+
     le_voice_vad_init(&vad);
     memset(frame, 0, sizeof(frame));
     for (i = 0; i < 20; ++i) {

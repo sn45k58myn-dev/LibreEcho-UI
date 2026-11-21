@@ -57,6 +57,9 @@ static int process_packet(struct le_voice_reference *reference,
     spx_uint32_t output_frames =
         (spx_uint32_t)(sizeof(downsampled) / sizeof(downsampled[0]));
     size_t expected_bytes;
+    int sequence_gap;
+    int recent_activity;
+    int starts_playback;
     int rc;
 
     if (packet_bytes < sizeof(packet->header) ||
@@ -76,17 +79,34 @@ static int process_packet(struct le_voice_reference *reference,
         ++reference->malformed_packets;
         return -1;
     }
-    if (reference->have_sequence &&
-        packet->header.sequence != reference->expected_sequence) {
+    sequence_gap = reference->have_sequence &&
+                   packet->header.sequence != reference->expected_sequence;
+    recent_activity = le_voice_reference_active(
+        reference, packet->header.monotonic_ns, LE_VOICE_REFERENCE_TAIL_NS);
+    starts_playback = packet->header.activity_mask && !recent_activity;
+    if (sequence_gap)
         ++reference->discontinuities;
+    if (starts_playback)
+        ++reference->edge_clears;
+    /* Clear BEFORE appending the first active period. A whole render period
+     * (and sometimes several) can arrive between two capture frames. */
+    if (sequence_gap || starts_playback) {
         ring_clear(reference);
         speex_resampler_reset_mem(
             (SpeexResamplerState *)reference->resampler);
     }
     reference->have_sequence = 1;
     reference->expected_sequence = packet->header.sequence + 1U;
-    reference->activity_mask = packet->header.activity_mask;
-    reference->last_packet_ns = packet->header.monotonic_ns;
+    if (packet->header.activity_mask) {
+        reference->last_active_ns = packet->header.monotonic_ns;
+    } else if (!recent_activity) {
+        /* No microphone frame will consume these idle keepalives. Preserve
+         * sequence accounting without building a queue of stale silence. */
+        reference->last_active_ns = 0;
+        ring_clear(reference);
+        ++reference->packets;
+        return 0;
+    }
 
     input_frames = packet->header.frames;
     rc = speex_resampler_process_int(
@@ -207,24 +227,13 @@ void le_voice_reference_read(struct le_voice_reference *reference,
     }
 }
 
-void le_voice_reference_clear(struct le_voice_reference *reference)
-{
-    if (!reference)
-        return;
-    ring_clear(reference);
-    if (reference->resampler)
-        speex_resampler_reset_mem(
-            (SpeexResamplerState *)reference->resampler);
-}
-
 int le_voice_reference_active(const struct le_voice_reference *reference,
                               uint64_t now_ns,
                               uint64_t timeout_ns)
 {
-    return reference && reference->activity_mask != 0 &&
-           reference->last_packet_ns != 0 &&
-           now_ns >= reference->last_packet_ns &&
-           now_ns - reference->last_packet_ns <= timeout_ns;
+    return reference && reference->last_active_ns != 0 &&
+           now_ns >= reference->last_active_ns &&
+           now_ns - reference->last_active_ns <= timeout_ns;
 }
 
 void le_voice_reference_close(struct le_voice_reference *reference)

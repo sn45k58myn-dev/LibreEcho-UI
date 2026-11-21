@@ -52,6 +52,15 @@ PID file; it never sends status probes to the single-call audio socket. Voice
 mode transitions stop the companion before changing owners and start it only
 after HA readiness. Calling permission stays off unless explicitly enabled. It needs the existing audio, LED, wake and HA/esphomed runtime.
 
+On the 2017 Echo 2 (`radar_puffin`), waked recognises the installed intercom
+companion over its Unix socket and opens a separate echo canceller for that
+call. The canceller delays its internal speaker reference by 30 ms and scales
+quiet signals inside the filter to improve their precision. A loud frame
+immediately reduces the internal gain. The ordinary wake and Assist streams
+continue to use their existing filter. The private waked `status` response
+reports `intercom_aec_active` while the call owns its filter. A failed filter
+allocation falls back to ordinary processed audio, as do other board profiles.
+
 The source Makefile installs `libreecho-intercomd` and
 `libreecho-intercomd.init`. Platform image assembly must also include both in
 its explicit binary/init whitelists, retain `intercom-ui.js` and

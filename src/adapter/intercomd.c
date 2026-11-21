@@ -27,15 +27,27 @@ static const char *led = "/run/libreecho/led.sock";
 static const char *bus = "/run/libreecho-audio/system.pcm";
 static const char *socket_path = LE_IC_SOCKET;
 static const char *lease = LE_IC_LEASE, *ack = LE_IC_ACK;
+static const char *stats_path = "/run/libreecho/intercom-last-call.json";
 /* The PCM engine may spend about 1.5 s preparing a cold output. */
 #define OUTPUT_STALL_LIMIT_MS 2500u
+/* Phone blocks arrive every 20 ms. The mixer consumes 42.7 ms periods.
+ * Allow short stalls without replaying a backlog after a cold start. */
+#define OUTPUT_BLOCKS 4u
+#define OUTPUT_MAX_AGE_MS 100u
+struct output_block {
+    int16_t pcm[2048];
+    size_t bytes;
+    uint64_t received;
+};
 static struct {
     int client, mic, output, stage;
     uint64_t started, checked, indicated, refreshed, last_input, mic_sample;
     uint64_t output_blocked_since;
     unsigned char mic_rx[8192], packet[LE_IC_PCM_BYTES];
-    size_t mic_n, packet_n, output_n;
-    int16_t output_pcm[2048];
+    size_t mic_n, packet_n;
+    unsigned head, queued;
+    struct output_block blocks[OUTPUT_BLOCKS];
+    unsigned phone_packets, rail_samples, dropped_blocks, blocked_writes;
     struct le_radio_resampler resampler;
 } s = { .client = -1, .mic = -1, .output = -1 };
 
@@ -59,6 +71,15 @@ static void end_call(void)
     if (s.mic >= 0) close(s.mic);
     if (s.output >= 0) close(s.output);
     unlink(lease); unlink(ack);
+    if (s.stage == 3) {
+        char summary[256];
+        int n = snprintf(summary, sizeof summary,
+            "{\"phone_packets\":%u,\"phone_rail_samples\":%u,"
+            "\"phone_dropped_blocks\":%u,\"fifo_blocked_writes\":%u}\n",
+            s.phone_packets, s.rail_samples, s.dropped_blocks + s.queued, s.blocked_writes);
+        if (n > 0 && (size_t)n < sizeof summary)
+            (void)config_write_atomic(stats_path, summary, (size_t)n);
+    }
     if (s.stage) (void)command(led, "pattern", "{\"name\":\"stop\",\"owner\":\"intercom\"}", NULL, 0);
     memset(&s, 0, sizeof s); s.client = s.mic = s.output = -1;
 }
@@ -142,6 +163,7 @@ static int microphone_read(void)
 static int phone_read(uint64_t now)
 {
     unsigned char b[LE_IC_PCM_BYTES + 1]; int16_t pcm[LE_IC_SAMPLES];
+    struct output_block *block;
     ssize_t n = recv(s.client, b, sizeof b, MSG_DONTWAIT | MSG_TRUNC); unsigned i; int count;
     if (n <= 0) return n < 0 && (errno == EAGAIN || errno == EINTR) ? 0 : -1;
     if (s.stage == 0) {
@@ -151,11 +173,49 @@ static int phone_read(uint64_t now)
         s.stage = 1; s.started = s.last_input = s.refreshed = now; return 0;
     }
     if (s.stage != 3 || n != LE_IC_PCM_BYTES) return -1;
-    for (i = 0; i < LE_IC_SAMPLES; i++) pcm[i] = (int16_t)((unsigned)b[i * 2] | (unsigned)b[i * 2 + 1] << 8);
-    /* Keep only the newest unsent block while the system FIFO is full. */
-    count = le_radio_resample(&s.resampler, pcm, LE_IC_SAMPLES, 1, 16000, s.output_pcm, 1024);
+    ++s.phone_packets;
+    for (i = 0; i < LE_IC_SAMPLES; i++) {
+        pcm[i] = (int16_t)((unsigned)b[i * 2] | (unsigned)b[i * 2 + 1] << 8);
+        if (pcm[i] == INT16_MIN || pcm[i] == INT16_MAX) ++s.rail_samples;
+    }
+    if (s.queued == OUTPUT_BLOCKS) {
+        s.head = (s.head + 1) % OUTPUT_BLOCKS;
+        --s.queued;
+        ++s.dropped_blocks;
+    }
+    block = &s.blocks[(s.head + s.queued) % OUTPUT_BLOCKS];
+    count = le_radio_resample(&s.resampler, pcm, LE_IC_SAMPLES, 1, 16000, block->pcm, 1024);
     if (count <= 0 || count > 1024) return -1;
-    s.output_n = (size_t)count * 4u; s.last_input = now; return 0;
+    block->bytes = (size_t)count * 4u;
+    block->received = now;
+    ++s.queued;
+    s.last_input = now;
+    return 0;
+}
+static int drain_phone_output(void)
+{
+    uint64_t now = le_ic_now();
+    while (s.queued) {
+        struct output_block *block = &s.blocks[s.head];
+        if (now - block->received > OUTPUT_MAX_AGE_MS) {
+            ++s.dropped_blocks;
+        } else {
+            /* Each stereo PCM write is <= 4096 bytes, hence atomic on the
+             * Linux FIFO. A short positive write is a sink contract error. */
+            ssize_t written = write(s.output, block->pcm, block->bytes);
+            if (written < 0 && errno == EINTR) return 0;
+            if (written < 0 && errno == EAGAIN) {
+                ++s.blocked_writes;
+                if (!s.output_blocked_since) s.output_blocked_since = now;
+                return 0;
+            }
+            if (written != (ssize_t)block->bytes) return -1;
+            s.output_blocked_since = 0;
+        }
+        s.head = (s.head + 1) % OUTPUT_BLOCKS;
+        --s.queued;
+    }
+    return 0;
 }
 int main(int argc, char **argv)
 {
@@ -173,6 +233,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i - 1], "--socket")) socket_path = v;
         else if (!strcmp(argv[i - 1], "--lease")) lease = v;
         else if (!strcmp(argv[i - 1], "--assist-ack")) ack = v;
+        else if (!strcmp(argv[i - 1], "--stats-file")) stats_path = v;
         else return 2;
     }
     if (strlen(socket_path) >= sizeof a.sun_path) return 2;
@@ -186,7 +247,7 @@ int main(int argc, char **argv)
     unlink(lease); unlink(ack);
     while (running) {
         struct pollfd p[4] = {{listener, POLLIN, 0}, {s.client, POLLIN, 0},
-            {s.mic, POLLIN, 0}, {s.output, s.output_n ? POLLOUT : 0, 0}};
+            {s.mic, POLLIN, 0}, {s.output, s.queued ? POLLOUT : 0, 0}};
         uint64_t now; int rc = poll(p, 4, 10);
         if (rc < 0 && errno != EINTR) break;
         now = le_ic_now();
@@ -233,18 +294,7 @@ int main(int argc, char **argv)
             if (indicator()) { end_call(); continue; }
         }
         if ((p[2].revents & POLLIN) && microphone_read()) { end_call(); continue; }
-        if (s.output_n) {
-            ssize_t written = write(s.output, s.output_pcm, s.output_n);
-            if (written == (ssize_t)s.output_n) {
-                s.output_n = 0;
-                s.output_blocked_since = 0;
-            } else if (written < 0 && (errno == EAGAIN || errno == EINTR)) {
-                if (!s.output_blocked_since) s.output_blocked_since = now;
-            } else {
-                end_call();
-                continue;
-            }
-        }
+        if (s.queued && drain_phone_output()) end_call();
     }
     end_call(); close(listener); unlink(socket_path); return 0;
 }

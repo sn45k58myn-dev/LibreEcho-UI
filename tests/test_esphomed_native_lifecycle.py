@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import select
 import socket
+import stat
 import struct
 import sys
 import termios
@@ -282,6 +283,43 @@ class NativeLifecycle(unittest.TestCase):
             self.s.sendall(fixture.frame(91))
             self.barrier()
             self.assertTrue(json.loads((self.p/'status.json').read_text())['in_progress'])
+
+    def test_reply_timing_reports_only_completed_assist_turns(self):
+        self.owner()
+        status_path = self.p / 'status.json'
+        self.assertIsNone(json.loads(status_path.read_text())['last_assist_reply'])
+        self.start_voice()
+        self.s.sendall(self.event(12))
+        self.barrier()
+        url, _ = self.wav_url()
+        reply = 'fixture reply text excluded from status'
+        self.s.sendall(self.event(7, text=reply) + self.event(8, url=url) + self.event(2))
+        self.wait_completion()
+        self.barrier()
+        raw = status_path.read_text()
+        self.assertNotIn(reply, raw)
+        self.assertNotIn(url, raw)
+        self.assertEqual(stat.S_IMODE(status_path.stat().st_mode), 0o600)
+        measured = json.loads(raw)['last_assist_reply']
+        self.assertEqual(set(measured), {'tts_start_ms', 'first_pcm_ms', 'underruns'})
+        self.assertGreaterEqual(measured['tts_start_ms'], 0)
+        self.assertGreaterEqual(measured['first_pcm_ms'], measured['tts_start_ms'])
+        self.assertGreaterEqual(measured['underruns'], 0)
+        self.assertLess(len(raw), 512, 'buttond still reads the full status in one bounded read')
+
+        self.s.sendall(fixture.frame(119, fixture.text(1, url)))
+        self.wait_completion()
+        self.barrier()
+        self.assertEqual(json.loads(status_path.read_text())['last_assist_reply'], measured)
+
+        self.start_voice()
+        self.s.sendall(self.event(7) + self.event(8, url=url) + self.event(2))
+        self.wait_completion()
+        self.barrier()
+        missing_anchor = json.loads(status_path.read_text())['last_assist_reply']
+        self.assertIsNone(missing_anchor['tts_start_ms'])
+        self.assertIsNone(missing_anchor['first_pcm_ms'])
+        self.assertGreaterEqual(missing_anchor['underruns'], 0)
 
     def test_standalone_preannounce_start_conversation_needs_no_run_end(self):
         self.owner()
