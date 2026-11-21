@@ -34,36 +34,36 @@ int main(int argc,char **argv){assert(argc==2);const char *dir=argv[1];memset(&S
 
  /* Absent, malformed and duplicate saved keys all remain silent. */
  const char *invalid[]={"",",\"esphome_voice_chimes\":false",",\"esphome_voice_chimes\":\"true\"",",\"esphome_voice_chimes\":true,\"esphome_voice_chimes\":false"};
- for(unsigned i=0;i<NELEM(invalid);i++){config(invalid[i]);assert(!S.voice_chimes);assert(!voice_start(4000,0));capture_end();calls();assert(!wakes&&!ends);clear();}
+ for(unsigned i=0;i<NELEM(invalid);i++){config(invalid[i]);assert(!S.voice_chimes);assert(!voice_start(4000,LE_WAKE_MODEL_STOCK_PHRASE));capture_end();calls();assert(!wakes&&!ends);clear();}
  config(",\"esphome_voice_chimes\":true");assert(S.voice_chimes);
  /* Wake/button share voice_start: one wake, then one end for STT/VAD/TTS. */
- assert(!voice_start(4000,0));assert(S.turn==1);calls();assert(wakes==1&&!ends);
+ assert(!voice_start(4000,LE_WAKE_MODEL_STOCK_PHRASE));assert(S.turn==1);calls();assert(wakes==1&&!ends);
  event(10);event(4);event(12);event(8);capture_end();event(2);calls();assert(wakes==1&&ends==1);clear();
- assert(!voice_start(4000,1));calls();assert(wakes==1);capture_end();calls();assert(ends==1);clear();
+ assert(!voice_start(4000,NULL));calls();assert(wakes==1);capture_end();calls();assert(ends==1);clear();
  /* A continuous HA wake stream is not itself a detected request. */
  S.server_wake=1;assert(!server_listen_start());S.turn=2;calls();assert(!wakes&&!ends);event(10);event(10);calls();assert(wakes==1&&!ends);event(12);event(4);calls();assert(wakes==1&&ends==1);clear();
  assert(!server_listen_start());S.turn=2;event(12);calls();assert(!wakes&&!ends);clear();S.server_wake=0;
  /* DND bypass is never requested, and cues do not gate listening. */
- dnd(1);assert(!voice_start(4000,0));capture_end();calls();assert(!wakes&&!ends);clear();dnd(0);
+ dnd(1);assert(!voice_start(4000,LE_WAKE_MODEL_STOCK_PHRASE));capture_end();calls();assert(!wakes&&!ends);clear();dnd(0);
  /* Cancellation drops a queued, unsent cue; no late chirp after cancelling. */
- assert(!voice_start(4000,0));user_cancel("fixture");calls();assert(!wakes&&!ends);clear();S.cancel_guard=0;
- assert(!voice_start(4000,0));event(0);calls();assert(!S.turn&&!wakes&&!ends);clear();
+ assert(!voice_start(4000,LE_WAKE_MODEL_STOCK_PHRASE));user_cancel("fixture");calls();assert(!wakes&&!ends);clear();S.cancel_guard=0;
+ assert(!voice_start(4000,LE_WAKE_MODEL_STOCK_PHRASE));event(0);calls();assert(!S.turn&&!wakes&&!ends);clear();
  /* Cancelling a cue must not cancel an unrelated BLE lease sharing the queue. */
  assert(!job(S.audio_path,"proxy_scan","{}",LE_BLE_JOB_LEASE,0));
  struct io *lease=NULL;for(unsigned i=0;i<JOBS;i++)if(S.jobs[i].kind==LE_BLE_JOB_LEASE&&S.jobs[i].fd>=0)lease=&S.jobs[i];assert(lease);
- assert(!voice_start(4000,0));user_cancel("BLE fixture");assert(lease->fd>=0&&lease->stage==1&&!lease->tx_sent);
+ assert(!voice_start(4000,LE_WAKE_MODEL_STOCK_PHRASE));user_cancel("BLE fixture");assert(lease->fd>=0&&lease->stage==1&&!lease->tx_sent);
  io_close(lease);calls();assert(!wakes&&!ends);clear();S.cancel_guard=0;
  /* Even a saturated job queue cannot refuse capture for a best-effort cue. */
  for(unsigned i=0;i<JOBS;i++)S.jobs[i].stage=1;
- assert(!voice_start(4000,0));assert(S.turn==1);capture_end();assert(S.turn==3);calls();assert(!wakes&&!ends);clear();
+ assert(!voice_start(4000,LE_WAKE_MODEL_STOCK_PHRASE));assert(S.turn==1);capture_end();assert(S.turn==3);calls();assert(!wakes&&!ends);clear();
  /* An actual error reply is not a failed control/volume job. */
- assert(!voice_start(4000,0));
+ assert(!voice_start(4000,LE_WAKE_MODEL_STOCK_PHRASE));
  for(unsigned i=0;i<JOBS;i++)if(S.jobs[i].fd>=0)(void)io_tick(&S.jobs[i]);
  int bad=accept(listener,NULL,NULL);assert(bad>=0);char request[2048];assert(recv(bad,request,sizeof request,MSG_DONTWAIT)>0);
  const char *error="{\"v\":1,\"id\":1,\"ok\":false,\"error\":\"unavailable\"}\n";assert(send(bad,error,strlen(error),MSG_NOSIGNAL)==(ssize_t)strlen(error));close(bad);
  jobs_tick();assert(S.turn==1&&!S.playing&&S.volume==0);clear();
  /* Adapter failure stays best-effort: capture still starts and ends. */
- close(listener);unlink(audio_path);assert(!voice_start(4000,0));assert(S.turn==1);capture_end();assert(S.turn==3);clear();
+ close(listener);unlink(audio_path);assert(!voice_start(4000,LE_WAKE_MODEL_STOCK_PHRASE));assert(S.turn==1);capture_end();assert(S.turn==3);clear();
  for(unsigned i=0;i<JOBS;i++)io_close(&S.jobs[i]);close(peer);close(S.clients[0].fd);unlink(status_path);unlink(dnd_path);unlink(config_path);char bak[520];snprintf(bak,sizeof bak,"%s.bak",config_path);unlink(bak);esp_playback_close(&S.playback);
  puts("HA chimes: opt-in, duplicate stages, server-wake, continuation, DND, cancellation and adapter failure PASS");return 0;
 }

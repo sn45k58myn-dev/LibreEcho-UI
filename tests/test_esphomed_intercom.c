@@ -23,7 +23,7 @@ int main(int argc,char **argv)
     S.turn=1;S.server_turn=1;S.pipeline=1;
     intercom_tick();assert(!S.turn&&!S.server_turn&&!strcmp(S.result,"intercom"));
     assert(le_ic_lease_active(intercom_ack,S.now));
-    (void)voice_start(0,0);assert(!S.turn);
+    (void)voice_start(0,LE_WAKE_MODEL_STOCK_PHRASE);assert(!S.turn);
     /* No writer refresh after a crash: elapsed time releases capture without
      * changing any saved or physical microphone mute/privacy preference. */
     S.now+=2100;S.last_audio_status=S.now;intercom_tick();assert(!mic_muted());
